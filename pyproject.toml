@@ -1,0 +1,22 @@
+[project]
+name = "channels-db"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Tobi", email = "tobidegnon@proton.me" }
+]
+requires-python = ">=3.14"
+dependencies = [
+    "channels[daphne,types]>=4.3.2",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.20,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "aiosqlite>=0.22.1",
+    "channels-redis>=4.3.0",
+]
