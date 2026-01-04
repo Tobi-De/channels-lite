@@ -1,15 +1,51 @@
 [project]
-name = "channels-db"
+name = "channels-lite"
 version = "0.1.0"
-description = "Add your description here"
+description = "Lightweight Django Channels layer backed by SQLite database"
 readme = "README.md"
+license = { text = "MIT" }
 authors = [
     { name = "Tobi", email = "tobidegnon@proton.me" }
 ]
-requires-python = ">=3.14"
+requires-python = ">=3.12"
+keywords = [
+    "django",
+    "channels",
+    "websockets",
+    "asgi",
+    "sqlite",
+    "channel-layer",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Web Environment",
+    "Framework :: Django",
+    "Framework :: Django :: 4.2",
+    "Framework :: Django :: 5.0",
+    "Framework :: Django :: 5.1",
+    "Framework :: Django :: 5.2",
+    "Framework :: Django :: 6.0",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
 dependencies = [
     "channels[daphne,types]>=4.3.2",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Tobi-De/channels-lite"
+Repository = "https://github.com/Tobi-De/channels-lite"
+Issues = "https://github.com/Tobi-De/channels-lite/issues"
+Changelog = "https://github.com/Tobi-De/channels-lite/releases"
 
 [build-system]
 requires = ["uv_build>=0.9.20,<0.10.0"]
