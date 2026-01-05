@@ -1,4 +1,4 @@
-# channels_db
+# channels-lite
 
 Django Channels layer backed by SQLite database.
 

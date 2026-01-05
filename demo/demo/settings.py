@@ -31,8 +31,8 @@ ASGI_APPLICATION = "demo.asgi.application"
 
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_db.lite.SqliteChannelLayer",
-        "CONFIG": {
+        "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+        "OPTIONS": {
             "database": "default",
         },
     },
@@ -49,7 +49,7 @@ INSTALLED_APPS = [
     "django.contrib.messages",
     "django.contrib.staticfiles",
     "channels",
-    "channels_db",
+    "channels_lite",
     "demo",
 ]
 

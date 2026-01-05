@@ -10,6 +10,10 @@ _default:
 @dj *ARGS:
     cd demo && uv run python manage.py {{ ARGS }}
 
+
+@test *ARGS:
+    uv run pytest {{ ARGS }}
+
 # Bump version, commit, tag, and push (usage: just release patch|minor|major|X.Y.Z)
 release VERSION:
     #!/usr/bin/env bash
