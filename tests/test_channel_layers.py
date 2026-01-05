@@ -11,8 +11,8 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.conf import settings
 
-from channels_lite.layers.aiosqlite_layer import AioSqliteChannelLayer
-from channels_lite.layers.aiosqlite_layer import ChannelEmpty as AioChannelEmpty
+from channels_lite.layers.aio import AioSqliteChannelLayer
+from channels_lite.layers.aio import ChannelEmpty as AioChannelEmpty
 from channels_lite.layers.core import ChannelEmpty, SqliteChannelLayer
 
 
@@ -25,11 +25,17 @@ async def send_three_messages_with_delay(channel_name, channel_layer, delay):
 
 
 async def group_send_three_messages_with_delay(group_name, channel_layer, delay):
-    await channel_layer.group_send(group_name, {"type": "test.message", "text": "First!"})
+    await channel_layer.group_send(
+        group_name, {"type": "test.message", "text": "First!"}
+    )
     await asyncio.sleep(delay)
-    await channel_layer.group_send(group_name, {"type": "test.message", "text": "Second!"})
+    await channel_layer.group_send(
+        group_name, {"type": "test.message", "text": "Second!"}
+    )
     await asyncio.sleep(delay)
-    await channel_layer.group_send(group_name, {"type": "test.message", "text": "Third!"})
+    await channel_layer.group_send(
+        group_name, {"type": "test.message", "text": "Third!"}
+    )
 
 
 # Parametrized fixture that provides both layer implementations
@@ -46,7 +52,9 @@ async def channel_layer(request):
     Each test will run twice - once with each layer.
     """
     if request.param == "django_orm":
-        layer = SqliteChannelLayer(database="default", capacity=100, channel_capacity={"tiny": 1})
+        layer = SqliteChannelLayer(
+            database="default", capacity=100, channel_capacity={"tiny": 1}
+        )
     else:  # aiosqlite
         db_path = settings.DATABASES["default"]["NAME"]
         layer = AioSqliteChannelLayer(db_path=db_path, capacity=100)
@@ -60,7 +68,9 @@ async def channel_layer(request):
 @pytest.mark.asyncio
 async def test_send_receive(channel_layer):
     """Test basic send and receive functionality."""
-    await channel_layer.send("test-channel-1", {"type": "test.message", "text": "Ahoy-hoy!"})
+    await channel_layer.send(
+        "test-channel-1", {"type": "test.message", "text": "Ahoy-hoy!"}
+    )
     message = await channel_layer.receive("test-channel-1")
     assert message["type"] == "test.message"
     assert message["text"] == "Ahoy-hoy!"
@@ -86,7 +96,9 @@ async def test_double_receive(channel_layer):
 async def test_process_local_send_receive(channel_layer):
     """Test process-local channels."""
     channel_name = await channel_layer.new_channel()
-    await channel_layer.send(channel_name, {"type": "test.message", "text": "Local only please"})
+    await channel_layer.send(
+        channel_name, {"type": "test.message", "text": "Local only please"}
+    )
     message = await channel_layer.receive(channel_name)
     assert message["type"] == "test.message"
     assert message["text"] == "Local only please"
@@ -211,7 +223,9 @@ async def test_message_expiry__earliest_message_expires(channel_layer):
     try:
         channel_name = await layer.new_channel()
 
-        task = asyncio.ensure_future(send_three_messages_with_delay(channel_name, layer, 2))
+        task = asyncio.ensure_future(
+            send_three_messages_with_delay(channel_name, layer, 2)
+        )
         await asyncio.wait_for(task, None)
 
         # The first message should have expired, only second and third should be there
@@ -244,7 +258,9 @@ async def test_message_expiry__all_messages_under_expiration_time(channel_layer)
     try:
         channel_name = await layer.new_channel()
 
-        task = asyncio.ensure_future(send_three_messages_with_delay(channel_name, layer, 1))
+        task = asyncio.ensure_future(
+            send_three_messages_with_delay(channel_name, layer, 1)
+        )
         await asyncio.wait_for(task, None)
 
         # All messages should be there
@@ -277,7 +293,9 @@ async def test_message_expiry__group_send(channel_layer):
         channel_name = await layer.new_channel()
         await layer.group_add("test-group", channel_name)
 
-        task = asyncio.ensure_future(group_send_three_messages_with_delay("test-group", layer, 2))
+        task = asyncio.ensure_future(
+            group_send_three_messages_with_delay("test-group", layer, 2)
+        )
         await asyncio.wait_for(task, None)
 
         # First message should have expired
@@ -459,29 +477,30 @@ async def test_capacity_not_enforced(channel_layer):
     await channel_layer.send("test-channel-1", {"type": "test.message"})  # No exception
 
 
-# Layer-specific tests below (not parametrized)
-
-
+@pytest.mark.parametrize("layer_type", ["django_orm", "aiosqlite"])
 @pytest.mark.asyncio
-async def test_random_reset__client_prefix():
+async def test_random_reset__client_prefix(layer_type):
     """Test that resetting random seed does not make us reuse client_prefixes."""
-    random.seed(1)
-    layer_1 = SqliteChannelLayer(database="default")
-    random.seed(1)
-    layer_2 = SqliteChannelLayer(database="default")
-    assert layer_1.client_prefix != layer_2.client_prefix
-    await layer_1.close()
-    await layer_2.close()
+    if layer_type == "django_orm":
+        random.seed(1)
+        layer_1 = SqliteChannelLayer(database="default")
+        random.seed(1)
+        layer_2 = SqliteChannelLayer(database="default")
+    else:  # aiosqlite
+        db_path = settings.DATABASES["default"]["NAME"]
+        random.seed(1)
+        layer_1 = AioSqliteChannelLayer(db_path=db_path)
+        random.seed(1)
+        layer_2 = AioSqliteChannelLayer(db_path=db_path)
 
-    # Test aiosqlite layer too
-    random.seed(1)
-    db_path = settings.DATABASES["default"]["NAME"]
-    aio_layer_1 = AioSqliteChannelLayer(db_path=db_path)
-    random.seed(1)
-    aio_layer_2 = AioSqliteChannelLayer(db_path=db_path)
-    assert aio_layer_1.client_prefix != aio_layer_2.client_prefix
-    await aio_layer_1.close()
-    await aio_layer_2.close()
+    try:
+        assert layer_1.client_prefix != layer_2.client_prefix
+    finally:
+        await layer_1.close()
+        await layer_2.close()
+
+
+# Layer-specific tests below (not parametrized)
 
 
 def test_repeated_group_send_with_async_to_sync():

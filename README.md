@@ -2,6 +2,69 @@
 
 Django Channels layer backed by SQLite database.
 
+## Installation
+
+### Basic Installation (Django ORM Layer)
+
+```bash
+pip install channels-lite
+```
+
+This installs the Django ORM-based channel layer that works with your existing Django database.
+
+### High-Performance Installation (AioSQLite Layer)
+
+```bash
+pip install channels-lite[aio]
+```
+
+This installs the aiosqlite-based layer with `aiosqlite`, `aiosqlitepool`, and `msgspec` for better performance through direct async SQLite access and MessagePack encoding.
+
+## Usage
+
+### Django ORM Layer
+
+Configure in your Django settings:
+
+```python
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+        "CONFIG": {
+            "database": "default",  # Django database alias
+            "expiry": 60,
+            "capacity": 100,
+        },
+    },
+}
+```
+
+### AioSQLite Layer (High Performance)
+
+```python
+CHANNEL_LAYERS = {
+    "default": {
+        "BACKEND": "channels_lite.layers.aio.AioSqliteChannelLayer",
+        "CONFIG": {
+            "db_path": "channels.db",  # Direct database file path
+            "expiry": 60,
+            "capacity": 100,
+            "pool_size": 10,
+            "polling_interval": 0.1,
+        },
+    },
+}
+```
+
+## Features
+
+- **Two implementation options**: Django ORM (easy setup) or aiosqlite (high performance)
+- **Process-local channel support**: Unique channel names per process
+- **Group messaging**: Send messages to multiple channels at once
+- **Message expiry**: Automatic cleanup of expired messages
+- **Connection pooling**: (aiosqlite layer) Efficient connection management
+- **MessagePack encoding**: (aiosqlite layer) Fast binary serialization
+
 ## TODO
 
 ### High Priority (Robustness)
@@ -24,10 +87,10 @@ Django Channels layer backed by SQLite database.
 
 ### Future Enhancements
 
-- [ ] Create advanced layer using `aiosqlite` + `aiosqlitepool` for better async support
-  - Direct connection pooling
-  - Better concurrent write handling
-  - More control over SQLite pragmas
+- [x] Create advanced layer using `aiosqlite` + `aiosqlitepool` for better async support ✅
+  - Direct connection pooling ✅
+  - Better concurrent write handling ✅
+  - More control over SQLite pragmas ✅
 - [ ] Consider adding encryption support for sensitive messages
 - [ ] Add health check endpoint for monitoring
 - [ ] Add metrics/instrumentation for observability

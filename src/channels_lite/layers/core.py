@@ -1,11 +1,11 @@
 import asyncio
+import json
 import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from datetime import timedelta
 
-import msgspec
 from asgiref.sync import sync_to_async
 from channels.exceptions import InvalidChannelLayerError
 from channels.layers import BaseChannelLayer
@@ -18,6 +18,7 @@ from ..models import Event, GroupMembership
 
 class ChannelEmpty(Exception):
     pass
+
 
 class SqliteChannelLayer(BaseChannelLayer):
     def __init__(
@@ -40,14 +41,16 @@ class SqliteChannelLayer(BaseChannelLayer):
         )
         self.database = database
         self.polling_interval = polling_interval
-        self.auto_trim = auto_trim,
+        self.auto_trim = (auto_trim,)
         self.expiry = expiry
         self.group_expiry = group_expiry
         # Decide on a unique client prefix to use in ! sections
         self.client_prefix = uuid.uuid4().hex
 
         # Buffering for process-specific channels
-        self.receive_buffer = defaultdict(lambda: asyncio.Queue())  # Dict[channel_name, asyncio.Queue]
+        self.receive_buffer = defaultdict(
+            lambda: asyncio.Queue()
+        )  # Dict[channel_name, asyncio.Queue]
         self._polling_tasks = {}  # Dict[prefix, asyncio.Task]
         self._active_receivers = defaultdict(int)  # Dict[prefix, int]
 
@@ -81,13 +84,13 @@ class SqliteChannelLayer(BaseChannelLayer):
             message["__asgi_channel__"] = channel
             channel_non_local_name = self.non_local_name(channel)
 
-        # Encode message using MessagePack
-        data_bytes = msgspec.msgpack.encode(message)
+        # Encode message as JSON bytes
+        data_bytes = json.dumps(message).encode("utf-8")
 
         await Event.objects.acreate(
             channel_name=channel_non_local_name,
             data=data_bytes,
-            expires_at=expiry or( timezone.now() + timedelta(seconds=self.expiry)),
+            expires_at=expiry or (timezone.now() + timedelta(seconds=self.expiry)),
         )
 
     async def _receive_single_from_db(self, channel):
@@ -104,12 +107,12 @@ class SqliteChannelLayer(BaseChannelLayer):
         event = await event_qs.filter(expires_at__gte=timezone.now()).afirst()
         if event:
             # if update was successful, the event is considered delivered
-            updated = await Event.objects.filter(
-                id=event.id, delivered=False
-            ).aupdate(delivered=True)
+            updated = await Event.objects.filter(id=event.id, delivered=False).aupdate(
+                delivered=True
+            )
             if updated:
-                # Decode MessagePack data
-                message = msgspec.msgpack.decode(event.data)
+                # Decode JSON data
+                message = json.loads(event.data.decode("utf-8"))
                 # Get the full channel name from __asgi_channel__ if present
                 full_channel = channel
                 if "__asgi_channel__" in message:
@@ -133,8 +136,10 @@ class SqliteChannelLayer(BaseChannelLayer):
         try:
             while True:
                 # Check shutdown condition: no active receivers and idle for 30min
-                if (self._active_receivers[prefix] == 0 and
-                    time.time() - last_activity > idle_timeout):
+                if (
+                    self._active_receivers[prefix] == 0
+                    and time.time() - last_activity > idle_timeout
+                ):
                     # Clean up and exit
                     if prefix in self._polling_tasks:
                         del self._polling_tasks[prefix]
@@ -176,7 +181,6 @@ class SqliteChannelLayer(BaseChannelLayer):
             assert real_channel.endswith(self.client_prefix + "!"), (
                 "Wrong client prefix"
             )
-
 
         # For process-specific channels, use buffering mechanism
         if "!" in channel:
@@ -239,7 +243,9 @@ class SqliteChannelLayer(BaseChannelLayer):
             .values("id")[:1]
         )
         channels_to_remove = Event.objects.filter(
-            id__in=models.Subquery(last_message_ids), expires_at__lt=grace_period, delivered=False
+            id__in=models.Subquery(last_message_ids),
+            expires_at__lt=grace_period,
+            delivered=False,
         ).values_list("channel_name", flat=True)
         GroupMembership.objects.filter(
             channel_name__in=list(channels_to_remove)
@@ -299,9 +305,11 @@ class SqliteChannelLayer(BaseChannelLayer):
         # Send to each channel
         @sync_to_async
         def _get_channels():
-            return list(GroupMembership.objects.filter(
-            group_name=group, expires_at__gte=timezone.now()
-        ).values_list("channel_name", flat=True))
+            return list(
+                GroupMembership.objects.filter(
+                    group_name=group, expires_at__gte=timezone.now()
+                ).values_list("channel_name", flat=True)
+            )
 
         channels = await _get_channels()
 
@@ -322,8 +330,8 @@ class SqliteChannelLayer(BaseChannelLayer):
                 msg = deepcopy(message)
                 channel_name = channel
 
-            # Encode message using MessagePack
-            data_bytes = msgspec.msgpack.encode(msg)
+            # Encode message as JSON bytes
+            data_bytes = json.dumps(msg).encode("utf-8")
 
             events.append(
                 Event(
@@ -334,4 +342,3 @@ class SqliteChannelLayer(BaseChannelLayer):
             )
 
         await Event.objects.abulk_create(events)
-

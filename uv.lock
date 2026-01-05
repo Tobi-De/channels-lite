@@ -198,6 +198,12 @@ version = "0.1.4"
 source = { editable = "." }
 dependencies = [
     { name = "channels", extra = ["daphne", "types"] },
+]
+
+[package.optional-dependencies]
+aio = [
+    { name = "aiosqlite" },
+    { name = "aiosqlitepool" },
     { name = "msgspec" },
 ]
 
@@ -217,9 +223,12 @@ dev = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiosqlite", marker = "extra == 'aio'", specifier = ">=0.22.1" },
+    { name = "aiosqlitepool", marker = "extra == 'aio'", specifier = ">=1.0.0" },
     { name = "channels", extras = ["daphne", "types"], specifier = ">=4.3.2" },
-    { name = "msgspec", specifier = ">=0.19.0" },
+    { name = "msgspec", marker = "extra == 'aio'", specifier = ">=0.19.0" },
 ]
+provides-extras = ["aio"]
 
 [package.metadata.requires-dev]
 dev = [

@@ -3,9 +3,9 @@ from django.db import models
 
 class Event(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField(db_index=True)  # Index for cleanup queries
+    expires_at = models.DateTimeField(db_index=True)
     channel_name = models.CharField(max_length=100)
-    data = models.BinaryField()  # Changed to BinaryField for MessagePack storage
+    data = models.BinaryField()
     delivered = models.BooleanField(default=False)
 
     class Meta:
@@ -21,7 +21,7 @@ class Event(models.Model):
 class GroupMembership(models.Model):
     group_name = models.CharField()
     channel_name = models.CharField()
-    expires_at = models.DateTimeField(db_index=True)  # Index for cleanup queries
+    expires_at = models.DateTimeField(db_index=True)
     joined_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:

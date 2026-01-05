@@ -105,7 +105,7 @@ def test_benchmark_point_to_point_aiosqlite(benchmark):
     Tests raw throughput for point-to-point messaging using aiosqlite.
     """
     from django.conf import settings
-    from channels_lite.layers.aiosqlite_layer import AioSqliteChannelLayer
+    from channels_lite.layers.aio import AioSqliteChannelLayer
 
     async def run_benchmark():
         # Use the Django test database
@@ -245,7 +245,7 @@ def test_benchmark_group_broadcast_aiosqlite(benchmark):
     Tests group operation performance under load using aiosqlite.
     """
     from django.conf import settings
-    from channels_lite.layers.aiosqlite_layer import AioSqliteChannelLayer
+    from channels_lite.layers.aio import AioSqliteChannelLayer
 
     async def run_benchmark():
         # Use the Django test database

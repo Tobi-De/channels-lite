@@ -3,24 +3,34 @@ AioSQLite-based channel layer implementation.
 
 This implementation uses aiosqlite and aiosqlitepool directly
 for potentially better performance compared to Django ORM.
+
+Requires installation with the [aio] extra:
+    pip install channels-lite[aio]
 """
 
 import asyncio
 import random
-import time
 import uuid
 from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 
-import aiosqlite
-import msgspec
-from aiosqlitepool import SQLiteConnectionPool
 from channels.layers import BaseChannelLayer
+
+try:
+    import aiosqlite
+    import msgspec
+    from aiosqlitepool import SQLiteConnectionPool
+except ImportError as e:
+    raise ImportError(
+        "The AioSqliteChannelLayer requires additional dependencies. "
+        "Install them with: pip install channels-lite[aio]"
+    ) from e
 
 
 class ChannelEmpty(Exception):
     """Exception raised when a channel is empty."""
+
     pass
 
 
@@ -40,7 +50,9 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         polling_interval=0.1,
         auto_trim=True,
     ):
-        super().__init__(expiry=expiry, capacity=capacity, channel_capacity=channel_capacity)
+        super().__init__(
+            expiry=expiry, capacity=capacity, channel_capacity=channel_capacity
+        )
         self.db_path = db_path
         self.group_expiry = group_expiry
         self.pool_size = pool_size
@@ -49,16 +61,19 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         self.pool = None
 
         # Process-local channel support
-        self.receive_buffer = defaultdict(lambda: asyncio.Queue())  # Dict[channel_name, asyncio.Queue]
+        self.receive_buffer = defaultdict(
+            lambda: asyncio.Queue()
+        )  # Dict[channel_name, asyncio.Queue]
         self._polling_tasks = {}
         self._active_receivers = defaultdict(int)
         self.client_prefix = uuid.uuid4().hex
 
     extensions = ["groups", "flush"]
-    
+
     async def _ensure_pool(self):
         """Ensure the connection pool is initialized."""
         if self.pool is None:
+
             async def connection_factory():
                 conn = await aiosqlite.connect(self.db_path)
                 conn.row_factory = aiosqlite.Row
@@ -67,12 +82,16 @@ class AioSqliteChannelLayer(BaseChannelLayer):
                 await conn.execute("PRAGMA synchronous=NORMAL")
                 await conn.execute("PRAGMA cache_size=10000")
                 await conn.execute("PRAGMA temp_store=MEMORY")
-                await conn.execute("PRAGMA mmap_size=268435456")  # 256MB memory-mapped I/O
+                await conn.execute(
+                    "PRAGMA mmap_size=268435456"
+                )  # 256MB memory-mapped I/O
                 await conn.execute("PRAGMA page_size=4096")
                 await conn.execute("PRAGMA busy_timeout=5000")
                 return conn
 
-            self.pool = SQLiteConnectionPool(connection_factory, pool_size=self.pool_size)
+            self.pool = SQLiteConnectionPool(
+                connection_factory, pool_size=self.pool_size
+            )
 
     def _to_django_datetime(self, dt=None):
         """Convert datetime to Django's ISO format string."""
@@ -110,7 +129,9 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         if expiry:
             expires_at = self._to_django_datetime(expiry)
         else:
-            expires_at = self._to_django_datetime(datetime.now() + timedelta(seconds=self.expiry))
+            expires_at = self._to_django_datetime(
+                datetime.now() + timedelta(seconds=self.expiry)
+            )
         # Use msgspec MessagePack for faster encoding
         data_bytes = msgspec.msgpack.encode(msg_to_send)
 
@@ -132,7 +153,9 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         real_channel = channel
         if "!" in channel:
             real_channel = self.non_local_name(channel)
-            assert real_channel.endswith(self.client_prefix + "!"), "Wrong client prefix"
+            assert real_channel.endswith(self.client_prefix + "!"), (
+                "Wrong client prefix"
+            )
 
         # For process-specific channels, use buffering mechanism
         if "!" in channel:
@@ -228,8 +251,12 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         """Remove expired events and group memberships."""
         async with self.pool.connection() as conn:
             now = self._to_django_datetime()
-            await conn.execute("DELETE FROM channels_lite_event WHERE expires_at < ?", (now,))
-            await conn.execute("DELETE FROM channels_lite_groupmembership WHERE expires_at < ?", (now,))
+            await conn.execute(
+                "DELETE FROM channels_lite_event WHERE expires_at < ?", (now,)
+            )
+            await conn.execute(
+                "DELETE FROM channels_lite_groupmembership WHERE expires_at < ?", (now,)
+            )
             await conn.commit()
 
     async def flush(self):
@@ -273,7 +300,9 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         self.require_valid_channel_name(channel)
         await self._ensure_pool()
 
-        expires_at = self._to_django_datetime(datetime.now() + timedelta(seconds=self.group_expiry))
+        expires_at = self._to_django_datetime(
+            datetime.now() + timedelta(seconds=self.group_expiry)
+        )
         joined_at = self._to_django_datetime()
 
         async with self.pool.connection() as conn:
@@ -324,7 +353,9 @@ class AioSqliteChannelLayer(BaseChannelLayer):
 
         # Prepare events for bulk insert
         created_at = self._to_django_datetime()
-        expiry = self._to_django_datetime(datetime.now() + timedelta(seconds=self.expiry))
+        expiry = self._to_django_datetime(
+            datetime.now() + timedelta(seconds=self.expiry)
+        )
         events = []
 
         for channel in channels:
@@ -351,5 +382,3 @@ class AioSqliteChannelLayer(BaseChannelLayer):
                 events,
             )
             await conn.commit()
-
-

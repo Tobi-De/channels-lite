@@ -57,6 +57,7 @@ def pytest_configure():
 
         # Create tables using migrations
         from django.core.management import call_command
+
         call_command("migrate", "channels_lite", verbosity=0)
 
 

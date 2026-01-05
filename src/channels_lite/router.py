@@ -1,5 +1,6 @@
 from django.conf import settings
-from channels.layers import get_channel_layer 
+from channels.layers import get_channel_layer
+
 
 class ChannelsRouter:
     """
@@ -35,4 +36,3 @@ class ChannelsRouter:
         if app_label in self.route_app_labels:
             return db == self.database
         return None
- 
