@@ -5,6 +5,7 @@ from collections import defaultdict
 from copy import deepcopy
 from datetime import timedelta
 
+import msgspec
 from asgiref.sync import sync_to_async
 from channels.exceptions import InvalidChannelLayerError
 from channels.layers import BaseChannelLayer
@@ -75,14 +76,17 @@ class SqliteChannelLayer(BaseChannelLayer):
         # name in message
         assert "__asgi_channel__" not in message
         channel_non_local_name = channel
+        message = deepcopy(message)
         if "!" in channel:
-            message = deepcopy(message)
             message["__asgi_channel__"] = channel
             channel_non_local_name = self.non_local_name(channel)
-            
+
+        # Encode message using MessagePack
+        data_bytes = msgspec.msgpack.encode(message)
+
         await Event.objects.acreate(
             channel_name=channel_non_local_name,
-            data=deepcopy(message),
+            data=data_bytes,
             expires_at=expiry or( timezone.now() + timedelta(seconds=self.expiry)),
         )
 
@@ -104,7 +108,8 @@ class SqliteChannelLayer(BaseChannelLayer):
                 id=event.id, delivered=False
             ).aupdate(delivered=True)
             if updated:
-                message = event.data
+                # Decode MessagePack data
+                message = msgspec.msgpack.decode(event.data)
                 # Get the full channel name from __asgi_channel__ if present
                 full_channel = channel
                 if "__asgi_channel__" in message:
@@ -290,8 +295,6 @@ class SqliteChannelLayer(BaseChannelLayer):
         # Check types
         assert isinstance(message, dict), "Message is not a dict"
         self.require_valid_group_name(group)
-        # # Run clean
-        # self._clean_expired()
 
         # Send to each channel
         @sync_to_async
@@ -301,6 +304,34 @@ class SqliteChannelLayer(BaseChannelLayer):
         ).values_list("channel_name", flat=True))
 
         channels = await _get_channels()
+
+        if not channels:
+            return
+
+        # Optimize: use bulk_create instead of individual sends
         expiry = timezone.now() + timedelta(seconds=self.expiry)
+        events = []
+
         for channel in channels:
-            await self.send(channel=channel, message=message, expiry=expiry)
+            # Handle process-local channels (with "!")
+            if "!" in channel:
+                msg = deepcopy(message)
+                msg["__asgi_channel__"] = channel
+                channel_name = self.non_local_name(channel)
+            else:
+                msg = deepcopy(message)
+                channel_name = channel
+
+            # Encode message using MessagePack
+            data_bytes = msgspec.msgpack.encode(msg)
+
+            events.append(
+                Event(
+                    channel_name=channel_name,
+                    data=data_bytes,
+                    expires_at=expiry,
+                )
+            )
+
+        await Event.objects.abulk_create(events)
+

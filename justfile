@@ -12,7 +12,13 @@ _default:
 
 
 @test *ARGS:
-    uv run pytest {{ ARGS }}
+    uv run pytest --benchmark-skip {{ ARGS }}
+
+@bench *ARGS:
+    uv run pytest tests/test_benchmarks.py --benchmark-only {{ ARGS }}
+
+@bench-fast *ARGS:
+    uv run pytest tests/test_benchmarks.py --benchmark-only -k "aiosqlite or redis" {{ ARGS }}
 
 # Bump version, commit, tag, and push (usage: just release patch|minor|major|X.Y.Z)
 release VERSION:

@@ -3,14 +3,15 @@ from django.db import models
 
 class Event(models.Model):
     created_at = models.DateTimeField(auto_now_add=True)
-    expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)  # Index for cleanup queries
     channel_name = models.CharField(max_length=100)
-    data = models.JSONField(default=dict)
+    data = models.BinaryField()  # Changed to BinaryField for MessagePack storage
     delivered = models.BooleanField(default=False)
 
     class Meta:
         indexes = [
-            models.Index(fields=["channel_name", "expires_at"]),
+            # Optimized for: WHERE channel_name=? AND delivered=0 AND expires_at>=? ORDER BY expires_at
+            models.Index(fields=["channel_name", "delivered", "expires_at"]),
         ]
 
     def __str__(self):
@@ -18,15 +19,16 @@ class Event(models.Model):
 
 
 class GroupMembership(models.Model):
-    group_name = models.CharField(db_index=True)
+    group_name = models.CharField()
     channel_name = models.CharField()
-    expires_at = models.DateTimeField()
+    expires_at = models.DateTimeField(db_index=True)  # Index for cleanup queries
     joined_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
         unique_together = [["group_name", "channel_name"]]
         indexes = [
-            models.Index(fields=["group_name", "joined_at"]),
+            # Optimized for: WHERE group_name=? AND expires_at>=?
+            models.Index(fields=["group_name", "expires_at"]),
         ]
 
     def __str__(self):
