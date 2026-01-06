@@ -2,6 +2,7 @@
 Parametrized tests for all channel layer implementations.
 Ensures both Django ORM and aiosqlite layers are spec-compliant.
 """
+
 from channels_lite.layers import BoundedQueue
 
 import asyncio
@@ -12,7 +13,7 @@ import pytest
 from asgiref.sync import async_to_sync
 
 from channels_lite.layers.aio import AIOSQLiteChannelLayer
-from channels_lite.layers.core import  SQLiteChannelLayer
+from channels_lite.layers.core import SQLiteChannelLayer
 
 
 async def send_three_messages_with_delay(channel_name, channel_layer, delay):
@@ -52,10 +53,12 @@ async def channel_layer(request):
     """
     if request.param == "django_orm":
         layer = SQLiteChannelLayer(
-            database="default", capacity=100, channel_capacity={"tiny": 1}
+            database="default", capacity=100, channel_capacity={"tiny*": 1}
         )
     else:  # aiosqlite
-        layer = AIOSQLiteChannelLayer(database="default", capacity=100)
+        layer = AIOSQLiteChannelLayer(
+            database="default", capacity=100, channel_capacity={"tiny*": 1}
+        )
 
     yield layer
 
@@ -523,3 +526,99 @@ async def test_receive_buffer_respects_capacity(channel_layer):
         assert list(range(9900, 10000)) == messages
     finally:
         await channel_layer.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_specific_capacity(channel_layer):
+    """Test that channel-specific capacity limits work correctly."""
+    # The fixture configures channel_capacity={"tiny*": 1}
+    # This means channels matching "tiny*" (glob pattern) should have capacity of 1
+
+    # Verify that get_capacity returns the correct capacity for different channels
+    tiny_channel = await channel_layer.new_channel(prefix="tiny")
+    normal_channel = await channel_layer.new_channel(prefix="normal")
+
+    # Check that tiny channel has capacity of 1
+    assert channel_layer.get_capacity(tiny_channel) == 1
+
+    # Check that normal channel has default capacity of 100
+    assert channel_layer.get_capacity(normal_channel) == 100
+
+    # Test that the buffer respects channel-specific capacity
+    # Create a buffer for the tiny channel and fill it beyond capacity
+    buff = BoundedQueue(maxsize=channel_layer.get_capacity(tiny_channel))
+    channel_layer.receive_buffer[tiny_channel] = buff
+
+    # Add more messages than capacity
+    for i in range(10):
+        buff.put_nowait({"type": f"message.{i}"})
+
+    # Should only have 1 message (the last one) because capacity is 1
+    assert buff.qsize() == 1
+    message = buff.get_nowait()
+    assert message["type"] == "message.9"
+
+    # Verify buffer is now empty
+    assert buff.empty()
+
+    # Test with normal channel buffer (capacity 100)
+    buff_normal = BoundedQueue(maxsize=channel_layer.get_capacity(normal_channel))
+    channel_layer.receive_buffer[normal_channel] = buff_normal
+
+    # Add 10 messages (well under capacity of 100)
+    for i in range(10):
+        buff_normal.put_nowait({"type": f"message.{i}"})
+
+    # All 10 messages should be available
+    assert buff_normal.qsize() == 10
+    for i in range(10):
+        message = buff_normal.get_nowait()
+        assert message["type"] == f"message.{i}"
+
+
+@pytest.mark.asyncio
+async def test_channel_specific_capacity_with_named_channels(channel_layer):
+    """Test channel-specific capacity with named/specific channels (non-process-local)."""
+    # The fixture configures channel_capacity={"tiny*": 1}
+
+    # Test with a specific named channel matching the pattern
+    tiny_specific_channel = "tiny_test_channel"
+    normal_specific_channel = "normal_test_channel"
+
+    # Verify capacity detection
+    assert channel_layer.get_capacity(tiny_specific_channel) == 1
+    assert channel_layer.get_capacity(normal_specific_channel) == 100
+
+    # Note: For non-process-local channels (without "!"), the channel layer uses
+    # direct database polling in receive(), not the buffer mechanism.
+    # So we test the capacity detection but not buffer behavior for these.
+
+    # Send messages to the tiny specific channel
+    await channel_layer.send(tiny_specific_channel, {"type": "message.1"})
+    await channel_layer.send(tiny_specific_channel, {"type": "message.2"})
+    await channel_layer.send(tiny_specific_channel, {"type": "message.3"})
+
+    # All messages are stored in the database for specific channels
+    # (capacity is only enforced in the receive buffer for process-local channels)
+    message1 = await channel_layer.receive(tiny_specific_channel)
+    message2 = await channel_layer.receive(tiny_specific_channel)
+    message3 = await channel_layer.receive(tiny_specific_channel)
+
+    assert message1["type"] == "message.1"
+    assert message2["type"] == "message.2"
+    assert message3["type"] == "message.3"
+
+    # Verify no more messages
+    with pytest.raises(asyncio.TimeoutError):
+        async with async_timeout.timeout(0.5):
+            await channel_layer.receive(tiny_specific_channel)
+
+    # Test with normal specific channel
+    await channel_layer.send(normal_specific_channel, {"type": "test.1"})
+    await channel_layer.send(normal_specific_channel, {"type": "test.2"})
+
+    msg1 = await channel_layer.receive(normal_specific_channel)
+    msg2 = await channel_layer.receive(normal_specific_channel)
+
+    assert msg1["type"] == "test.1"
+    assert msg2["type"] == "test.2"

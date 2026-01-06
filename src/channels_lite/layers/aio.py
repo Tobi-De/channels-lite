@@ -8,6 +8,7 @@ Requires installation with the [aio] extra:
     pip install channels-lite[aio]
 """
 
+from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
 try:
@@ -33,8 +34,11 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         self.pool = None
         self.db_path = self.db_settings["NAME"]
 
-    async def _ensure_pool(self):
-        """Ensure the connection pool is initialized."""
+    @asynccontextmanager
+    async def connection(self):
+        """
+        Context manager that ensures pool is initialized and returns a connection.
+        """
         if self.pool is None:
 
             async def connection_factory():
@@ -62,6 +66,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                 connection_factory, pool_size=self.pool_size
             )
 
+        async with self.pool.connection() as conn:
+            yield conn
+
     def _to_django_datetime(self, dt=None):
         """Convert datetime to Django's ISO format string."""
         if dt is None:
@@ -77,8 +84,6 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def send(self, channel, message, expiry=None):
         """Send a message onto a (general or specific) channel."""
-        await self._ensure_pool()
-
         channel_non_local_name, prepared_message = self._prepare_message_for_send(
             channel, message
         )
@@ -88,7 +93,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             expiry or datetime.now() + timedelta(seconds=self.expiry)
         )
 
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             await conn.execute(
                 """
                 INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
@@ -100,8 +105,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def _receive_single_from_db(self, channel):
         """Pull a single message from the database for the given channel."""
-        await self._ensure_pool()
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             now = self._to_django_datetime()
 
             # Find first non-delivered, non-expired message
@@ -137,7 +141,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def _clean_expired(self):
         """Remove expired events and group memberships."""
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             now = self._to_django_datetime()
             await conn.execute(
                 "DELETE FROM channels_lite_event WHERE expires_at < ?", (now,)
@@ -161,7 +165,6 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                     ORDER BY events2.created_at DESC
                     LIMIT 1
                 )
-                
                 AND events.expires_at < ?
                 AND events.delivered = 0
              );
@@ -172,8 +175,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def flush(self):
         """Flush all messages and groups."""
-        await self._ensure_pool()
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             await conn.execute("DELETE FROM channels_lite_event")
             await conn.execute("DELETE FROM channels_lite_groupmembership")
             await conn.commit()
@@ -199,14 +201,13 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         """Add a channel to a group."""
         self.require_valid_group_name(group)
         self.require_valid_channel_name(channel)
-        await self._ensure_pool()
 
         expires_at = self._to_django_datetime(
             datetime.now() + timedelta(seconds=self.group_expiry)
         )
         joined_at = self._to_django_datetime()
 
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             # Use INSERT OR REPLACE to handle unique constraint
             await conn.execute(
                 """
@@ -222,9 +223,8 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         """Remove a channel from a group."""
         self.require_valid_channel_name(channel)
         self.require_valid_group_name(group)
-        await self._ensure_pool()
 
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             await conn.execute(
                 "DELETE FROM channels_lite_groupmembership WHERE group_name = ? AND channel_name = ?",
                 (group, channel),
@@ -235,10 +235,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         """Send a message to all channels in a group."""
         assert isinstance(message, dict), "Message is not a dict"
         self.require_valid_group_name(group)
-        await self._ensure_pool()
 
         # Get all channels in the group
-        async with self.pool.connection() as conn:
+        async with self.connection() as conn:
             now = self._to_django_datetime()
             cursor = await conn.execute(
                 """
@@ -275,7 +274,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
         # Bulk insert
         if events:
-            async with self.pool.connection() as conn:
+            async with self.connection() as conn:
                 await conn.executemany(
                     """
                     INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)

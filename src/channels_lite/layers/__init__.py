@@ -150,7 +150,6 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                     if prefix not in self._polling_tasks:
                         self._polling_tasks[prefix] = asyncio.create_task(
                             self._poll_and_distribute(prefix)
-
                         )
                 buff = self.receive_buffer.get(channel)
                 if buff is None:
