@@ -10,7 +10,6 @@ Requires installation with the [aio] extra:
 
 import asyncio
 import random
-from copy import deepcopy
 from datetime import datetime, timedelta
 
 try:
@@ -111,32 +110,16 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def send(self, channel, message, expiry=None):
         """Send a message onto a (general or specific) channel."""
-        assert isinstance(message, dict), "message is not a dict"
-        self.require_valid_channel_name(channel)
-
         await self._ensure_pool()
 
-        # Handle process-local channels
-        assert "__asgi_channel__" not in message
-        channel_non_local_name = channel
-
-        # Only deepcopy if needed for process-local channels
-        if "!" in channel:
-            msg_to_send = deepcopy(message)
-            msg_to_send["__asgi_channel__"] = channel
-            channel_non_local_name = self.non_local_name(channel)
-        else:
-            msg_to_send = message
-
+        channel_non_local_name, prepared_message = self._prepare_message_for_send(
+            channel, message
+        )
+        data_bytes = self.serialize(prepared_message)
         created_at = self._to_django_datetime()
-        if expiry:
-            expires_at = self._to_django_datetime(expiry)
-        else:
-            expires_at = self._to_django_datetime(
-                datetime.now() + timedelta(seconds=self.expiry)
-            )
-        # Serialize message to bytes
-        data_bytes = self.serialize(msg_to_send)
+        expires_at = self._to_django_datetime(
+            expiry or datetime.now() + timedelta(seconds=self.expiry)
+        )
 
         async with self.pool.connection() as conn:
             await conn.execute(
@@ -226,7 +209,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                 if conn.total_changes > 0:
                     # Deserialize message data
                     message = self.deserialize(data_json)
-                    return channel, message
+                    # Extract full channel name
+                    full_channel = self._extract_message_channel(message, channel)
+                    return full_channel, message
 
             raise ChannelEmpty()
 
@@ -235,10 +220,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         while self._active_receivers[prefix] > 0:
             try:
                 channel_name, message = await self._receive_single_from_db(prefix)
-                target_channel = message.get("__asgi_channel__")
-
-                if target_channel and target_channel in self.receive_buffer:
-                    await self.receive_buffer[target_channel].put(message)
+                # channel_name is the full channel name (already extracted by _extract_message_channel)
+                if channel_name in self.receive_buffer:
+                    await self.receive_buffer[channel_name].put(message)
             except ChannelEmpty:
                 await asyncio.sleep(self.polling_interval)  # Wait before polling again
             except Exception:
@@ -349,24 +333,25 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         for channel in channels:
             # Handle process-local channels
             if "!" in channel:
-                msg = deepcopy(message)
-                msg["__asgi_channel__"] = channel
+                msg_to_send = message.copy()
+                msg_to_send["__asgi_channel__"] = channel
                 channel_name = self.non_local_name(channel)
             else:
-                msg = deepcopy(message)
+                msg_to_send = message
                 channel_name = channel
 
             # Serialize message to bytes
-            data_bytes = self.serialize(msg)
+            data_bytes = self.serialize(msg_to_send)
             events.append((created_at, expiry, channel_name, data_bytes, 0))
 
         # Bulk insert
-        async with self.pool.connection() as conn:
-            await conn.executemany(
-                """
-                INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
-                VALUES (?, ?, ?, ?, ?)
-                """,
-                events,
-            )
-            await conn.commit()
+        if events:
+            async with self.pool.connection() as conn:
+                await conn.executemany(
+                    """
+                    INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    events,
+                )
+                await conn.commit()

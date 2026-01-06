@@ -507,3 +507,31 @@ def test_repeated_group_send_with_async_to_sync(channel_layer):
         pytest.fail(f"repeated async_to_sync wrapped group_send calls raised {exc}")
     finally:
         async_to_sync(channel_layer.close)()
+
+
+@pytest.mark.parametrize("layer_type", ["django_orm", "aiosqlite"])
+async def test_receive_buffer_respects_capacity(layer_type):
+    """Test that BoundedQueue respects capacity and drops oldest messages."""
+    if layer_type == "django_orm":
+        channel_layer = SQLiteChannelLayer(database="default")
+    else:  # aiosqlite
+        channel_layer = AIOSQLiteChannelLayer(database="default")
+
+    try:
+        buff = channel_layer.receive_buffer["test-channel"]
+
+        # Add way more messages than capacity
+        for i in range(10000):
+            buff.put_nowait(i)
+
+        capacity = 100
+        assert channel_layer.capacity == capacity
+        assert buff.full() is True
+        assert buff.qsize() == capacity
+
+        # Should only have the last 100 messages (9900-9999)
+        # because BoundedQueue drops oldest when full
+        messages = [buff.get_nowait() for _ in range(capacity)]
+        assert list(range(9900, 10000)) == messages
+    finally:
+        await channel_layer.close()

@@ -1,6 +1,6 @@
+from copy import deepcopy
 import asyncio
 import time
-from copy import deepcopy
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
@@ -43,21 +43,10 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
         """
         Send a message onto a (general or specific) channel.
         """
-        # Typecheck
-        assert isinstance(message, dict), "message is not a dict"
-        self.require_valid_channel_name(channel)
-        # If it's a process-local channel, strip off local part and stick full
-        # name in message
-        assert "__asgi_channel__" not in message
-        channel_non_local_name = channel
-        message = deepcopy(message)
-        if "!" in channel:
-            message["__asgi_channel__"] = channel
-            channel_non_local_name = self.non_local_name(channel)
-
-        # Serialize message to bytes
-        data_bytes = self.serialize(message)
-
+        channel_non_local_name, prepared_message = self._prepare_message_for_send(
+            channel, message
+        )
+        data_bytes = self.serialize(prepared_message)
         await Event.objects.acreate(
             channel_name=channel_non_local_name,
             data=data_bytes,
@@ -82,16 +71,10 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
                 delivered=True
             )
             if updated:
-                # Deserialize message data
                 message = self.deserialize(event.data)
-                # Get the full channel name from __asgi_channel__ if present
-                full_channel = channel
-                if "__asgi_channel__" in message:
-                    full_channel = message["__asgi_channel__"]
-                    del message["__asgi_channel__"]
+                full_channel = self._extract_message_channel(message, channel)
                 return full_channel, message
 
-        # No message available
         raise ChannelEmpty()
 
     async def _poll_and_distribute(self, prefix):
@@ -126,8 +109,7 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
                     await self.receive_buffer[msg_channel].put(message)
                     last_activity = time.time()  # Reset idle timer
 
-                except Exception:
-                    # No message available or error, run cleanup and sleep
+                except ChannelEmpty:
                     if self.auto_trim:
                         await self._clean_expired()
                     await asyncio.sleep(self.polling_interval)
@@ -176,7 +158,7 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
             try:
                 _, message = await self._receive_single_from_db(real_channel)
                 return message
-            except:
+            except ChannelEmpty:
                 # No message available, run cleanup and sleep
                 if self.auto_trim:
                     await self._clean_expired()
@@ -265,23 +247,20 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
         if not channels:
             return
 
-        # Optimize: use bulk_create instead of individual sends
         expiry = timezone.now() + timedelta(seconds=self.expiry)
         events = []
 
         for channel in channels:
             # Handle process-local channels (with "!")
             if "!" in channel:
-                msg = deepcopy(message)
-                msg["__asgi_channel__"] = channel
+                msg_to_send = deepcopy(message)
+                msg_to_send["__asgi_channel__"] = channel
                 channel_name = self.non_local_name(channel)
             else:
-                msg = deepcopy(message)
+                msg_to_send = message
                 channel_name = channel
 
-            # Serialize message to bytes
-            data_bytes = self.serialize(msg)
-
+            data_bytes = self.serialize(msg_to_send)
             events.append(
                 Event(
                     channel_name=channel_name,
@@ -290,4 +269,5 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
                 )
             )
 
-        await Event.objects.abulk_create(events)
+        if events:
+            await Event.objects.abulk_create(events)
