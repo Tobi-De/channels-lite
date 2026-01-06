@@ -53,7 +53,7 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     # Expire cleanup
 
-    async def _clean_expired(self):
+    async def clean_expired(self):
         """
         Goes through all messages and groups and removes those that are expired.
         Any channel with an expired message is removed from all groups.

@@ -8,6 +8,7 @@ Requires installation with the [aio] extra:
     pip install channels-lite[aio]
 """
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -139,7 +140,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
             raise ChannelEmpty()
 
-    async def _clean_expired(self):
+    async def clean_expired(self):
         """Remove expired events and group memberships."""
         async with self.connection() as conn:
             now = self._to_django_datetime()
@@ -187,13 +188,13 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def close(self):
         """Close the channel layer and clean up resources."""
-        # Close the connection pool first
+        # Call parent's close first to cancel polling tasks
+        await super().close()
+
         if self.pool:
             await self.pool.close()
+            await asyncio.sleep(0.05)
             self.pool = None
-
-        # Call parent's close to handle task cancellation and cleanup
-        await super().close()
 
     # Groups extension
 

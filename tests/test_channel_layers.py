@@ -335,7 +335,7 @@ async def test_message_expiry__group_send__one_channel_expires_message(channel_l
         await asyncio.sleep(3.5)
 
         # Manually trigger cleanup
-        await layer._clean_expired()
+        await layer.clean_expired()
 
         # Now send three messages to the group
         await group_send_three_messages_with_delay("test-group", layer, 0)

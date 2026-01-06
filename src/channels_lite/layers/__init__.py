@@ -167,7 +167,7 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
             except ChannelEmpty:
                 # No message available, occasionally run cleanup and sleep
                 if self.auto_trim and random.random() < 0.01:
-                    await self._clean_expired()
+                    await self.clean_expired()
                 await asyncio.sleep(self.polling_interval)
 
     async def _poll_and_distribute(self, prefix):
@@ -214,7 +214,7 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                 except ChannelEmpty:
                     # No message available, occasionally run cleanup and sleep
                     if self.auto_trim and random.random() < 0.01:
-                        await self._clean_expired()
+                        await self.clean_expired()
                     await asyncio.sleep(self.polling_interval)
 
         except asyncio.CancelledError:
@@ -242,13 +242,16 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         """
         raise NotImplementedError("Subclasses must implement _receive_single_from_db")
 
-    async def _clean_expired(self):
+    async def clean_expired(self):
         """
         Remove expired events and group memberships.
 
+        This is a public API method that can be called manually for maintenance.
+        It's also called automatically during polling if auto_trim is enabled.
+
         This is an abstract method that should be implemented by subclasses.
         """
-        raise NotImplementedError("Subclasses must implement _clean_expired")
+        raise NotImplementedError("Subclasses must implement clean_expired")
 
     # Helper methods for common send/receive patterns
 
