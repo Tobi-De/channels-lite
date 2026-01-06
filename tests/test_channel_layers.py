@@ -2,6 +2,7 @@
 Parametrized tests for all channel layer implementations.
 Ensures both Django ORM and aiosqlite layers are spec-compliant.
 """
+from channels_lite.layers import BoundedQueue
 
 import asyncio
 import random
@@ -9,11 +10,9 @@ import random
 import async_timeout
 import pytest
 from asgiref.sync import async_to_sync
-from django.conf import settings
 
 from channels_lite.layers.aio import AIOSQLiteChannelLayer
-from channels_lite.layers.aio import ChannelEmpty as AioChannelEmpty
-from channels_lite.layers.core import ChannelEmpty, SQLiteChannelLayer
+from channels_lite.layers.core import  SQLiteChannelLayer
 
 
 async def send_three_messages_with_delay(channel_name, channel_layer, delay):
@@ -503,16 +502,11 @@ def test_repeated_group_send_with_async_to_sync(channel_layer):
         async_to_sync(channel_layer.close)()
 
 
-@pytest.mark.parametrize("layer_type", ["django_orm", "aiosqlite"])
-async def test_receive_buffer_respects_capacity(layer_type):
+async def test_receive_buffer_respects_capacity(channel_layer):
     """Test that BoundedQueue respects capacity and drops oldest messages."""
-    if layer_type == "django_orm":
-        channel_layer = SQLiteChannelLayer(database="default")
-    else:  # aiosqlite
-        channel_layer = AIOSQLiteChannelLayer(database="default")
-
     try:
-        buff = channel_layer.receive_buffer["test-channel"]
+        buff = BoundedQueue(channel_layer.capacity)
+        channel_layer.receive_buffer["test-channel"] = buff
 
         # Add way more messages than capacity
         for i in range(10000):

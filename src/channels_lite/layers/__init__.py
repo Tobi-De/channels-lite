@@ -85,10 +85,12 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self.polling_interval = polling_interval
         self.polling_idle_timeout = polling_idle_timeout
         self.auto_trim = auto_trim
+        self.capacity = capacity
+        self.channel_capacity = self.compile_capacities(channel_capacity or {})
 
         # Process-local channel support
         self.client_prefix = uuid.uuid4().hex
-        self.receive_buffer = defaultdict(lambda: BoundedQueue(maxsize=self.capacity))
+        self.receive_buffer = {}
         self._polling_tasks = {}
         self._polling_locks = defaultdict(asyncio.Lock)  # Lock per prefix
         self._active_receivers = defaultdict(int)
@@ -131,16 +133,14 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         """
 
         self.require_valid_channel_name(channel)
-
         real_channel = channel
+
+        # For process-specific channels, use buffering mechanism
         if "!" in channel:
             real_channel = self.non_local_name(channel)
             assert real_channel.endswith(self.client_prefix + "!"), (
                 "Wrong client prefix"
             )
-
-        # For process-specific channels, use buffering mechanism
-        if "!" in channel:
             prefix = real_channel
             self._active_receivers[prefix] += 1
 
@@ -150,8 +150,13 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                     if prefix not in self._polling_tasks:
                         self._polling_tasks[prefix] = asyncio.create_task(
                             self._poll_and_distribute(prefix)
+
                         )
-                return await self.receive_buffer[channel].get()
+                buff = self.receive_buffer.get(channel)
+                if buff is None:
+                    buff = BoundedQueue(maxsize=self.get_capacity(channel))
+                    self.receive_buffer[channel] = buff
+                return await buff.get()
             finally:
                 self._active_receivers[prefix] -= 1
 
@@ -200,7 +205,11 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                     msg_channel, message = await self._receive_single_from_db(prefix)
 
                     # Route to the appropriate buffer based on full channel name
-                    await self.receive_buffer[msg_channel].put(message)
+                    buff = self.receive_buffer.get(msg_channel)
+                    if buff is None:
+                        buff = BoundedQueue(maxsize=self.get_capacity(msg_channel))
+                        self.receive_buffer[msg_channel] = buff
+                    await buff.put(message)
                     last_activity = time.time()  # Reset idle timer
 
                 except ChannelEmpty:

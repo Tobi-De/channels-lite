@@ -8,8 +8,6 @@ Requires installation with the [aio] extra:
     pip install channels-lite[aio]
 """
 
-import asyncio
-import random
 from datetime import datetime, timedelta
 
 try:
