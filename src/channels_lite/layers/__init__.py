@@ -2,7 +2,9 @@
 Base channel layer implementation for SQLite-based layers.
 """
 
+import time
 import asyncio
+import random
 import uuid
 from collections import defaultdict
 from copy import deepcopy
@@ -51,6 +53,7 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         channel_capacity=None,
         group_expiry=86400,
         polling_interval=0.1,
+        polling_idle_timeout=1800,
         auto_trim=True,
         serializer_format="json",
         symmetric_encryption_keys=None,
@@ -80,12 +83,14 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self.expiry = expiry
         self.group_expiry = group_expiry
         self.polling_interval = polling_interval
+        self.polling_idle_timeout = polling_idle_timeout
         self.auto_trim = auto_trim
 
         # Process-local channel support
         self.client_prefix = uuid.uuid4().hex
         self.receive_buffer = defaultdict(lambda: BoundedQueue(maxsize=self.capacity))
         self._polling_tasks = {}
+        self._polling_locks = defaultdict(asyncio.Lock)  # Lock per prefix
         self._active_receivers = defaultdict(int)
 
         # Serialization
@@ -118,6 +123,124 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self._polling_tasks.clear()
         self._active_receivers.clear()
         self.receive_buffer.clear()
+
+    async def receive(self, channel):
+        """
+        Receive the first message that arrives on the channel.
+        If more than one coroutine is waiting, lock and start poll and distribute task
+        """
+
+        self.require_valid_channel_name(channel)
+
+        real_channel = channel
+        if "!" in channel:
+            real_channel = self.non_local_name(channel)
+            assert real_channel.endswith(self.client_prefix + "!"), (
+                "Wrong client prefix"
+            )
+
+        # For process-specific channels, use buffering mechanism
+        if "!" in channel:
+            prefix = real_channel
+            self._active_receivers[prefix] += 1
+
+            try:
+                # Start polling task if not already running (with lock to prevent races)
+                async with self._polling_locks[prefix]:
+                    if prefix not in self._polling_tasks:
+                        self._polling_tasks[prefix] = asyncio.create_task(
+                            self._poll_and_distribute(prefix)
+                        )
+                return await self.receive_buffer[channel].get()
+            finally:
+                self._active_receivers[prefix] -= 1
+
+        # For normal channels, use direct polling
+        while True:
+            try:
+                _, message = await self._receive_single_from_db(real_channel)
+                return message
+            except ChannelEmpty:
+                # No message available, occasionally run cleanup and sleep
+                if self.auto_trim and random.random() < 0.01:
+                    await self._clean_expired()
+                await asyncio.sleep(self.polling_interval)
+
+    async def _poll_and_distribute(self, prefix):
+        """
+        Background task that polls the database for messages on a given prefix
+        and distributes them to the appropriate channel buffers.
+
+        Auto-shuts down after polling_idle_timeout seconds of inactivity (no receivers + no messages).
+
+        This method should be called by concrete implementations.
+        """
+
+        last_activity = time.time()
+
+        try:
+            while True:
+                # Check shutdown condition: no active receivers and idle timeout exceeded
+                if (
+                    self._active_receivers[prefix] == 0
+                    and time.time() - last_activity > self.polling_idle_timeout
+                ):
+                    # Clean up and exit
+                    if prefix in self._polling_tasks:
+                        del self._polling_tasks[prefix]
+                    if prefix in self._active_receivers:
+                        del self._active_receivers[prefix]
+                    if prefix in self._polling_locks:
+                        del self._polling_locks[prefix]
+                    return
+
+                try:
+                    # Pull one message from database
+                    # Subclasses implement _receive_single_from_db
+                    msg_channel, message = await self._receive_single_from_db(prefix)
+
+                    # Route to the appropriate buffer based on full channel name
+                    await self.receive_buffer[msg_channel].put(message)
+                    last_activity = time.time()  # Reset idle timer
+
+                except ChannelEmpty:
+                    # No message available, occasionally run cleanup and sleep
+                    if self.auto_trim and random.random() < 0.01:
+                        await self._clean_expired()
+                    await asyncio.sleep(self.polling_interval)
+
+        except asyncio.CancelledError:
+            # Task was cancelled, clean up
+            if prefix in self._polling_tasks:
+                del self._polling_tasks[prefix]
+            if prefix in self._polling_locks:
+                del self._polling_locks[prefix]
+            raise
+
+    async def _receive_single_from_db(self, channel):
+        """
+        Pull a single message from the database for the given channel.
+
+        This is an abstract method that must be implemented by subclasses.
+
+        Args:
+            channel: The channel name to receive from
+
+        Returns:
+            tuple: (full_channel_name, message_dict)
+
+        Raises:
+            ChannelEmpty: If no message is available
+        """
+        raise NotImplementedError("Subclasses must implement _receive_single_from_db")
+
+    async def _clean_expired(self):
+        """
+        Remove expired events and group memberships.
+
+        This is an abstract method that should be implemented by subclasses.
+        """
+        raise NotImplementedError("Subclasses must implement _clean_expired")
 
     # Helper methods for common send/receive patterns
 

@@ -29,36 +29,10 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
     Channel layer backed by SQLite using aiosqlite and connection pooling.
     """
 
-    def __init__(
-        self,
-        *,
-        database,
-        expiry=60,
-        capacity=100,
-        channel_capacity=None,
-        group_expiry=86400,
-        pool_size=10,
-        polling_interval=0.1,
-        auto_trim=True,
-        serializer_format="msgpack",
-        symmetric_encryption_keys=None,
-        **kwargs,
-    ):
-        super().__init__(
-            database=database,
-            expiry=expiry,
-            capacity=capacity,
-            channel_capacity=channel_capacity,
-            group_expiry=group_expiry,
-            polling_interval=polling_interval,
-            auto_trim=auto_trim,
-            serializer_format=serializer_format,
-            symmetric_encryption_keys=symmetric_encryption_keys,
-            **kwargs,
-        )
+    def __init__(self, *, serializer_format="msgpack", pool_size=10, **kwargs):
+        super().__init__(serializer_format=serializer_format, **kwargs)
         self.pool_size = pool_size
         self.pool = None
-        # Get database path from Django settings (db_settings already set by parent)
         self.db_path = self.db_settings["NAME"]
 
     async def _ensure_pool(self):
@@ -70,25 +44,20 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                 conn.row_factory = aiosqlite.Row
 
                 # Check if user provided custom init_command in database OPTIONS
-                init_command = self.db_settings.get("OPTIONS", {}).get("init_command")
+                init_command = self.db_settings.get("OPTIONS", {}).get(
+                    "init_command",
+                    """
+                    PRAGMA journal_mode=WAL;
+                    PRAGMA synchronous=NORMAL;
+                    PRAGMA cache_size=10000;
+                    PRAGMA temp_store=MEMORY;
+                    PRAGMA mmap_size=268435456;
+                    PRAGMA page_size=4096;
+                    PRAGMA busy_timeout=5000;
+                    """,
+                )
 
-                if init_command:
-                    # Use user-provided init commands (supports multiple statements)
-                    await conn.executescript(init_command)
-                else:
-                    # Use default optimized PRAGMA settings
-                    await conn.executescript(
-                        """
-                        PRAGMA journal_mode=WAL;
-                        PRAGMA synchronous=NORMAL;
-                        PRAGMA cache_size=10000;
-                        PRAGMA temp_store=MEMORY;
-                        PRAGMA mmap_size=268435456;
-                        PRAGMA page_size=4096;
-                        PRAGMA busy_timeout=5000;
-                        """
-                    )
-
+                await conn.executescript(init_command)
                 return conn
 
             self.pool = SQLiteConnectionPool(
@@ -131,54 +100,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             )
             await conn.commit()
 
-    async def receive(self, channel):
-        """Receive the first message that arrives on the channel."""
-        self.require_valid_channel_name(channel)
-        await self._ensure_pool()
-
-        real_channel = channel
-        if "!" in channel:
-            real_channel = self.non_local_name(channel)
-            assert real_channel.endswith(self.client_prefix + "!"), (
-                "Wrong client prefix"
-            )
-
-        # For process-specific channels, use buffering mechanism
-        if "!" in channel:
-            prefix = real_channel
-            self._active_receivers[prefix] += 1
-
-            try:
-                # Start polling task if not already running
-                if prefix not in self._polling_tasks:
-                    self._polling_tasks[prefix] = asyncio.create_task(
-                        self._poll_process_channel(prefix)
-                    )
-                return await self.receive_buffer[channel].get()
-            except asyncio.CancelledError:
-                # Task was cancelled, clean up
-                if prefix in self._polling_tasks:
-                    del self._polling_tasks[prefix]
-                raise
-            finally:
-                self._active_receivers[prefix] -= 1
-
-        # Regular channels
-        try:
-            channel_name, message = await self._receive_single_from_db(real_channel)
-
-            # Clean expired messages periodically
-            if self.auto_trim and random.random() < 0.01:
-                await self._clean_expired()
-
-            return message
-        except ChannelEmpty:
-            if self.auto_trim and random.random() < 0.01:
-                await self._clean_expired()
-            raise
-
     async def _receive_single_from_db(self, channel):
         """Pull a single message from the database for the given channel."""
+        await self._ensure_pool()
         async with self.pool.connection() as conn:
             now = self._to_django_datetime()
 
@@ -207,27 +131,11 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
                 # Check if update was successful
                 if conn.total_changes > 0:
-                    # Deserialize message data
                     message = self.deserialize(data_json)
-                    # Extract full channel name
                     full_channel = self._extract_message_channel(message, channel)
                     return full_channel, message
 
             raise ChannelEmpty()
-
-    async def _poll_process_channel(self, prefix):
-        """Poll the database for messages destined for process-local channels."""
-        while self._active_receivers[prefix] > 0:
-            try:
-                channel_name, message = await self._receive_single_from_db(prefix)
-                # channel_name is the full channel name (already extracted by _extract_message_channel)
-                if channel_name in self.receive_buffer:
-                    await self.receive_buffer[channel_name].put(message)
-            except ChannelEmpty:
-                await asyncio.sleep(self.polling_interval)  # Wait before polling again
-            except Exception:
-                # Log error in production, for now just continue
-                await asyncio.sleep(self.polling_interval)
 
     async def _clean_expired(self):
         """Remove expired events and group memberships."""
@@ -238,6 +146,29 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             )
             await conn.execute(
                 "DELETE FROM channels_lite_groupmembership WHERE expires_at < ?", (now,)
+            )
+            # remove from all groups channel with unread messages
+            grace_period = self._to_django_datetime(
+                datetime.now() - timedelta(seconds=30)
+            )
+            await conn.execute(
+                """
+            DELETE FROM channels_lite_groupmembership
+            WHERE channel_name IN (
+             SELECT events.channel_name
+              FROM channels_lite_event events
+               WHERE id = (
+                   SELECT events2.id FROM channels_lite_event events2
+                    WHERE events2.channel_name = events.channel_name
+                    ORDER BY events2.created_at DESC
+                    LIMIT 1
+                )
+                
+                AND events.expires_at < ?
+                AND events.delivered = 0
+             );
+            """,
+                (grace_period,),
             )
             await conn.commit()
 

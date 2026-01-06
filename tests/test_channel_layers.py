@@ -390,15 +390,9 @@ async def test_flush(channel_layer):
 
     await channel_layer.flush()
 
-    # Verify everything is cleared
-    # Note: aiosqlite layer raises ChannelEmpty, Django ORM layer times out
-    if isinstance(channel_layer, AIOSQLiteChannelLayer):
-        with pytest.raises(AioChannelEmpty):
+    with pytest.raises(asyncio.TimeoutError):
+        async with async_timeout.timeout(0.5):
             await channel_layer.receive("test-channel")
-    else:
-        with pytest.raises(asyncio.TimeoutError):
-            async with async_timeout.timeout(0.5):
-                await channel_layer.receive("test-channel")
 
 
 @pytest.mark.asyncio
