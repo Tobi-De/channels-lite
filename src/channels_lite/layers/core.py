@@ -1,26 +1,17 @@
 import asyncio
-import json
 import time
-import uuid
-from collections import defaultdict
 from copy import deepcopy
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
-from channels.exceptions import InvalidChannelLayerError
-from channels.layers import BaseChannelLayer
-from django.conf import settings
 from django.db import models
 from django.utils import timezone
 
+from . import BaseSQLiteChannelLayer, ChannelEmpty
 from ..models import Event, GroupMembership
 
 
-class ChannelEmpty(Exception):
-    pass
-
-
-class SqliteChannelLayer(BaseChannelLayer):
+class SQLiteChannelLayer(BaseSQLiteChannelLayer):
     def __init__(
         self,
         *,
@@ -31,42 +22,22 @@ class SqliteChannelLayer(BaseChannelLayer):
         group_expiry=86400,
         capacity=100,
         channel_capacity=None,
+        serializer_format="json",
+        symmetric_encryption_keys=None,
         **kwargs,
     ):
         super().__init__(
+            database=database,
+            polling_interval=polling_interval,
+            auto_trim=auto_trim,
             expiry=expiry,
+            group_expiry=group_expiry,
             capacity=capacity,
             channel_capacity=channel_capacity,
+            serializer_format=serializer_format,
+            symmetric_encryption_keys=symmetric_encryption_keys,
             **kwargs,
         )
-        self.database = database
-        self.polling_interval = polling_interval
-        self.auto_trim = (auto_trim,)
-        self.expiry = expiry
-        self.group_expiry = group_expiry
-        # Decide on a unique client prefix to use in ! sections
-        self.client_prefix = uuid.uuid4().hex
-
-        # Buffering for process-specific channels
-        self.receive_buffer = defaultdict(
-            lambda: asyncio.Queue()
-        )  # Dict[channel_name, asyncio.Queue]
-        self._polling_tasks = {}  # Dict[prefix, asyncio.Task]
-        self._active_receivers = defaultdict(int)  # Dict[prefix, int]
-
-        try:
-            self.db_settings = settings.DATABASES[self.database]
-            assert "sqlite3" in self.db_settings["ENGINE"]
-        except KeyError:
-            raise InvalidChannelLayerError(
-                "%s is an invalid database alias" % self.database
-            )
-        except AssertionError:
-            raise InvalidChannelLayerError(
-                "Sqlite3 Database Engine is Needed to use this channel layer"
-            )
-
-    extensions = ["groups", "flush"]
 
     async def send(self, channel, message, expiry=None):
         """
@@ -84,8 +55,8 @@ class SqliteChannelLayer(BaseChannelLayer):
             message["__asgi_channel__"] = channel
             channel_non_local_name = self.non_local_name(channel)
 
-        # Encode message as JSON bytes
-        data_bytes = json.dumps(message).encode("utf-8")
+        # Serialize message to bytes
+        data_bytes = self.serialize(message)
 
         await Event.objects.acreate(
             channel_name=channel_non_local_name,
@@ -111,8 +82,8 @@ class SqliteChannelLayer(BaseChannelLayer):
                 delivered=True
             )
             if updated:
-                # Decode JSON data
-                message = json.loads(event.data.decode("utf-8"))
+                # Deserialize message data
+                message = self.deserialize(event.data)
                 # Get the full channel name from __asgi_channel__ if present
                 full_channel = channel
                 if "__asgi_channel__" in message:
@@ -211,13 +182,6 @@ class SqliteChannelLayer(BaseChannelLayer):
                     await self._clean_expired()
                 await asyncio.sleep(self.polling_interval)
 
-    async def new_channel(self, prefix="specific."):
-        """
-        Returns a new channel name that can be used by something in our
-        process as a specific channel.
-        """
-        return f"{prefix}.{self.client_prefix}!{uuid.uuid4().hex}"
-
     # Expire cleanup
 
     async def _clean_expired(self):
@@ -256,21 +220,6 @@ class SqliteChannelLayer(BaseChannelLayer):
     async def flush(self):
         await Event.objects.all().adelete()
         await GroupMembership.objects.all().adelete()
-
-    async def close(self):
-        """Clean up any running background polling tasks."""
-        # Cancel all polling tasks
-        for task in list(self._polling_tasks.values()):
-            task.cancel()
-
-        # Wait for all tasks to complete cancellation
-        if self._polling_tasks:
-            await asyncio.gather(*self._polling_tasks.values(), return_exceptions=True)
-
-        # Clear tracking dictionaries
-        self._polling_tasks.clear()
-        self._active_receivers.clear()
-        self.receive_buffer.clear()
 
     # Groups extension
 
@@ -330,8 +279,8 @@ class SqliteChannelLayer(BaseChannelLayer):
                 msg = deepcopy(message)
                 channel_name = channel
 
-            # Encode message as JSON bytes
-            data_bytes = json.dumps(msg).encode("utf-8")
+            # Serialize message to bytes
+            data_bytes = self.serialize(msg)
 
             events.append(
                 Event(

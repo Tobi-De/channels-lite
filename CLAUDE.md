@@ -48,7 +48,7 @@ just release X.Y.Z                # Release specific version
 ### Core Components
 
 **1. Channel Layer (`src/channels_lite/layers/core.py`)**
-- `SqliteChannelLayer`: Main channel layer implementation
+- `SQLiteChannelLayer`: Main channel layer implementation
 - Implements Django Channels layer spec using SQLite database
 - Key mechanism: Background polling tasks (`_poll_and_distribute`) for process-specific channels
 - Process-specific channels (containing `!`) use buffering with `asyncio.Queue`
@@ -108,7 +108,7 @@ just release X.Y.Z                # Release specific version
 ```python
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+        "BACKEND": "channels_lite.layers.core.SQLiteChannelLayer",
         "OPTIONS": {
             "database": "default",  # Database alias from DATABASES setting
             "polling_interval": 0.1,

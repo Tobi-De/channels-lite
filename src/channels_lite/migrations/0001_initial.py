@@ -4,39 +4,63 @@ from django.db import migrations, models
 
 
 class Migration(migrations.Migration):
-
     initial = True
 
-    dependencies = [
-    ]
+    dependencies = []
 
     operations = [
         migrations.CreateModel(
-            name='Event',
+            name="Event",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('created_at', models.DateTimeField(auto_now_add=True)),
-                ('expires_at', models.DateTimeField(db_index=True)),
-                ('channel_name', models.CharField(max_length=100)),
-                ('data', models.BinaryField()),
-                ('delivered', models.BooleanField(default=False)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("created_at", models.DateTimeField(auto_now_add=True)),
+                ("expires_at", models.DateTimeField(db_index=True)),
+                ("channel_name", models.CharField(max_length=100)),
+                ("data", models.BinaryField()),
+                ("delivered", models.BooleanField(default=False)),
             ],
             options={
-                'indexes': [models.Index(fields=['channel_name', 'delivered', 'expires_at'], name='channels_li_channel_7553e7_idx')],
+                "indexes": [
+                    models.Index(
+                        fields=["channel_name", "delivered", "expires_at"],
+                        name="channels_li_channel_7553e7_idx",
+                    )
+                ],
             },
         ),
         migrations.CreateModel(
-            name='GroupMembership',
+            name="GroupMembership",
             fields=[
-                ('id', models.BigAutoField(auto_created=True, primary_key=True, serialize=False, verbose_name='ID')),
-                ('group_name', models.CharField()),
-                ('channel_name', models.CharField()),
-                ('expires_at', models.DateTimeField(db_index=True)),
-                ('joined_at', models.DateTimeField(auto_now_add=True)),
+                (
+                    "id",
+                    models.BigAutoField(
+                        auto_created=True,
+                        primary_key=True,
+                        serialize=False,
+                        verbose_name="ID",
+                    ),
+                ),
+                ("group_name", models.CharField()),
+                ("channel_name", models.CharField()),
+                ("expires_at", models.DateTimeField(db_index=True)),
+                ("joined_at", models.DateTimeField(auto_now_add=True)),
             ],
             options={
-                'indexes': [models.Index(fields=['group_name', 'expires_at'], name='channels_li_group_n_6c3675_idx')],
-                'unique_together': {('group_name', 'channel_name')},
+                "indexes": [
+                    models.Index(
+                        fields=["group_name", "expires_at"],
+                        name="channels_li_group_n_6c3675_idx",
+                    )
+                ],
+                "unique_together": {("group_name", "channel_name")},
             },
         ),
     ]

@@ -11,9 +11,9 @@ import pytest
 from asgiref.sync import async_to_sync
 from django.conf import settings
 
-from channels_lite.layers.aio import AioSqliteChannelLayer
+from channels_lite.layers.aio import AIOSQLiteChannelLayer
 from channels_lite.layers.aio import ChannelEmpty as AioChannelEmpty
-from channels_lite.layers.core import ChannelEmpty, SqliteChannelLayer
+from channels_lite.layers.core import ChannelEmpty, SQLiteChannelLayer
 
 
 async def send_three_messages_with_delay(channel_name, channel_layer, delay):
@@ -52,12 +52,11 @@ async def channel_layer(request):
     Each test will run twice - once with each layer.
     """
     if request.param == "django_orm":
-        layer = SqliteChannelLayer(
+        layer = SQLiteChannelLayer(
             database="default", capacity=100, channel_capacity={"tiny": 1}
         )
     else:  # aiosqlite
-        db_path = settings.DATABASES["default"]["NAME"]
-        layer = AioSqliteChannelLayer(db_path=db_path, capacity=100)
+        layer = AIOSQLiteChannelLayer(database="default", capacity=100)
 
     yield layer
 
@@ -214,11 +213,10 @@ async def test_random_reset__channel_name(channel_layer):
 async def test_message_expiry__earliest_message_expires(channel_layer):
     """Test that the earliest message expires first."""
     # Need to create new layer with custom expiry
-    if isinstance(channel_layer, SqliteChannelLayer):
-        layer = SqliteChannelLayer(database="default", expiry=3)
+    if isinstance(channel_layer, SQLiteChannelLayer):
+        layer = SQLiteChannelLayer(database="default", expiry=3)
     else:
-        db_path = settings.DATABASES["default"]["NAME"]
-        layer = AioSqliteChannelLayer(db_path=db_path, expiry=3)
+        layer = AIOSQLiteChannelLayer(database="default", expiry=3)
 
     try:
         channel_name = await layer.new_channel()
@@ -249,11 +247,10 @@ async def test_message_expiry__earliest_message_expires(channel_layer):
 @pytest.mark.asyncio
 async def test_message_expiry__all_messages_under_expiration_time(channel_layer):
     """Test that all messages are preserved when under expiration time."""
-    if isinstance(channel_layer, SqliteChannelLayer):
-        layer = SqliteChannelLayer(database="default", expiry=3)
+    if isinstance(channel_layer, SQLiteChannelLayer):
+        layer = SQLiteChannelLayer(database="default", expiry=3)
     else:
-        db_path = settings.DATABASES["default"]["NAME"]
-        layer = AioSqliteChannelLayer(db_path=db_path, expiry=3)
+        layer = AIOSQLiteChannelLayer(database="default", expiry=3)
 
     try:
         channel_name = await layer.new_channel()
@@ -283,11 +280,10 @@ async def test_message_expiry__all_messages_under_expiration_time(channel_layer)
 @pytest.mark.asyncio
 async def test_message_expiry__group_send(channel_layer):
     """Test message expiry with group_send."""
-    if isinstance(channel_layer, SqliteChannelLayer):
-        layer = SqliteChannelLayer(database="default", expiry=3)
+    if isinstance(channel_layer, SQLiteChannelLayer):
+        layer = SQLiteChannelLayer(database="default", expiry=3)
     else:
-        db_path = settings.DATABASES["default"]["NAME"]
-        layer = AioSqliteChannelLayer(db_path=db_path, expiry=3)
+        layer = AIOSQLiteChannelLayer(database="default", expiry=3)
 
     try:
         channel_name = await layer.new_channel()
@@ -318,11 +314,10 @@ async def test_message_expiry__group_send(channel_layer):
 @pytest.mark.asyncio
 async def test_message_expiry__group_send__one_channel_expires_message(channel_layer):
     """Test message expiry with controlled timing using auto_trim=False."""
-    if isinstance(channel_layer, SqliteChannelLayer):
-        layer = SqliteChannelLayer(database="default", expiry=3, auto_trim=False)
+    if isinstance(channel_layer, SQLiteChannelLayer):
+        layer = SQLiteChannelLayer(database="default", expiry=3, auto_trim=False)
     else:
-        db_path = settings.DATABASES["default"]["NAME"]
-        layer = AioSqliteChannelLayer(db_path=db_path, expiry=3, auto_trim=False)
+        layer = AIOSQLiteChannelLayer(database="default", expiry=3, auto_trim=False)
 
     try:
         channel_1 = await layer.new_channel()
@@ -397,7 +392,7 @@ async def test_flush(channel_layer):
 
     # Verify everything is cleared
     # Note: aiosqlite layer raises ChannelEmpty, Django ORM layer times out
-    if isinstance(channel_layer, AioSqliteChannelLayer):
+    if isinstance(channel_layer, AIOSQLiteChannelLayer):
         with pytest.raises(AioChannelEmpty):
             await channel_layer.receive("test-channel")
     else:
@@ -483,15 +478,14 @@ async def test_random_reset__client_prefix(layer_type):
     """Test that resetting random seed does not make us reuse client_prefixes."""
     if layer_type == "django_orm":
         random.seed(1)
-        layer_1 = SqliteChannelLayer(database="default")
+        layer_1 = SQLiteChannelLayer(database="default")
         random.seed(1)
-        layer_2 = SqliteChannelLayer(database="default")
+        layer_2 = SQLiteChannelLayer(database="default")
     else:  # aiosqlite
-        db_path = settings.DATABASES["default"]["NAME"]
         random.seed(1)
-        layer_1 = AioSqliteChannelLayer(db_path=db_path)
+        layer_1 = AIOSQLiteChannelLayer(database="default")
         random.seed(1)
-        layer_2 = AioSqliteChannelLayer(db_path=db_path)
+        layer_2 = AIOSQLiteChannelLayer(database="default")
 
     try:
         assert layer_1.client_prefix != layer_2.client_prefix
@@ -500,13 +494,8 @@ async def test_random_reset__client_prefix(layer_type):
         await layer_2.close()
 
 
-# Layer-specific tests below (not parametrized)
-
-
-def test_repeated_group_send_with_async_to_sync():
+def test_repeated_group_send_with_async_to_sync(channel_layer):
     """Test repeated group_send calls wrapped in async_to_sync (Django ORM layer only)."""
-    channel_layer = SqliteChannelLayer(database="default", capacity=3)
-
     try:
         async_to_sync(channel_layer.group_send)(
             "channel_name_1", {"type": "test.message.1"}

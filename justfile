@@ -4,6 +4,10 @@ set dotenv-load := true
 _default:
     @just --list --unsorted
 
+
+@install:
+    uv sync --all-extras
+
 @runserver:
     cd demo && uv run python manage.py runserver
 

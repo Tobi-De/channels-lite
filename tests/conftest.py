@@ -2,10 +2,10 @@
 
 import os
 import tempfile
-import django
-from django.conf import settings
-import pytest
 
+import django
+import pytest
+from django.conf import settings
 
 # Use a temporary file database that persists during the test session
 TEST_DB = os.path.join(tempfile.gettempdir(), "channels_lite_test.db")
@@ -46,7 +46,7 @@ def pytest_configure():
             SECRET_KEY="test-secret-key",
             CHANNEL_LAYERS={
                 "default": {
-                    "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+                    "BACKEND": "channels_lite.layers.core.SQLiteChannelLayer",
                     "OPTIONS": {
                         "database": "default",
                     },

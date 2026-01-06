@@ -12,7 +12,7 @@ pip install channels-lite
 
 This installs the Django ORM-based channel layer that works with your existing Django database.
 
-### High-Performance Installation (AioSQLite Layer)
+### High-Performance Installation (AIOSQLite Layer)
 
 ```bash
 pip install channels-lite[aio]
@@ -29,7 +29,7 @@ Configure in your Django settings:
 ```python
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+        "BACKEND": "channels_lite.layers.core.SQLiteChannelLayer",
         "CONFIG": {
             "database": "default",  # Django database alias
             "expiry": 60,
@@ -39,14 +39,14 @@ CHANNEL_LAYERS = {
 }
 ```
 
-### AioSQLite Layer (High Performance)
+### AIOSQLite Layer (High Performance)
 
 ```python
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_lite.layers.aio.AioSqliteChannelLayer",
+        "BACKEND": "channels_lite.layers.aio.AIOSQLiteChannelLayer",
         "CONFIG": {
-            "db_path": "channels.db",  # Direct database file path
+            "database": "default",  # Django database alias
             "expiry": 60,
             "capacity": 100,
             "pool_size": 10,
@@ -55,6 +55,39 @@ CHANNEL_LAYERS = {
     },
 }
 ```
+
+**Note:** Both layers use the same `database` parameter (Django database alias).
+
+### Configuring SQLite Performance Settings
+
+The AIO layer respects Django's database `init_command` option. You can customize SQLite PRAGMA settings:
+
+```python
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": BASE_DIR / "db.sqlite3",
+        "OPTIONS": {
+            # Custom SQLite settings for AIO layer
+            "init_command": (
+                "PRAGMA journal_mode=WAL; "
+                "PRAGMA synchronous=NORMAL; "
+                "PRAGMA cache_size=10000; "
+                "PRAGMA temp_store=MEMORY;"
+            ),
+        },
+    }
+}
+```
+
+If no `init_command` is provided, the AIO layer uses optimized defaults:
+- `PRAGMA journal_mode=WAL` - Write-Ahead Logging for better concurrency
+- `PRAGMA synchronous=NORMAL` - Balanced durability/performance
+- `PRAGMA cache_size=10000` - Larger cache for better performance
+- `PRAGMA temp_store=MEMORY` - Store temp tables in memory
+- `PRAGMA mmap_size=268435456` - 256MB memory-mapped I/O
+- `PRAGMA page_size=4096` - Optimal page size
+- `PRAGMA busy_timeout=5000` - 5 second timeout for locks
 
 ## Features
 

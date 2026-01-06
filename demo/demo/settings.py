@@ -31,7 +31,7 @@ ASGI_APPLICATION = "demo.asgi.application"
 
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_lite.layers.core.SqliteChannelLayer",
+        "BACKEND": "channels_lite.layers.core.SQLiteChannelLayer",
         "OPTIONS": {
             "database": "default",
         },

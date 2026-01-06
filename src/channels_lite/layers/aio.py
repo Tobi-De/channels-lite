@@ -1,5 +1,5 @@
 """
-AioSQLite-based channel layer implementation.
+AIOSQLite-based channel layer implementation.
 
 This implementation uses aiosqlite and aiosqlitepool directly
 for potentially better performance compared to Django ORM.
@@ -10,38 +10,30 @@ Requires installation with the [aio] extra:
 
 import asyncio
 import random
-import uuid
-from collections import defaultdict
 from copy import deepcopy
 from datetime import datetime, timedelta
 
-from channels.layers import BaseChannelLayer
-
 try:
     import aiosqlite
-    import msgspec
     from aiosqlitepool import SQLiteConnectionPool
 except ImportError as e:
     raise ImportError(
-        "The AioSqliteChannelLayer requires additional dependencies. "
+        "The AIOSQLiteChannelLayer requires additional dependencies. "
         "Install them with: pip install channels-lite[aio]"
     ) from e
 
-
-class ChannelEmpty(Exception):
-    """Exception raised when a channel is empty."""
-
-    pass
+from . import BaseSQLiteChannelLayer, ChannelEmpty
 
 
-class AioSqliteChannelLayer(BaseChannelLayer):
+class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
     """
     Channel layer backed by SQLite using aiosqlite and connection pooling.
     """
 
     def __init__(
         self,
-        db_path="channels.db",
+        *,
+        database,
         expiry=60,
         capacity=100,
         channel_capacity=None,
@@ -49,26 +41,26 @@ class AioSqliteChannelLayer(BaseChannelLayer):
         pool_size=10,
         polling_interval=0.1,
         auto_trim=True,
+        serializer_format="msgpack",
+        symmetric_encryption_keys=None,
+        **kwargs,
     ):
         super().__init__(
-            expiry=expiry, capacity=capacity, channel_capacity=channel_capacity
+            database=database,
+            expiry=expiry,
+            capacity=capacity,
+            channel_capacity=channel_capacity,
+            group_expiry=group_expiry,
+            polling_interval=polling_interval,
+            auto_trim=auto_trim,
+            serializer_format=serializer_format,
+            symmetric_encryption_keys=symmetric_encryption_keys,
+            **kwargs,
         )
-        self.db_path = db_path
-        self.group_expiry = group_expiry
         self.pool_size = pool_size
-        self.polling_interval = polling_interval
-        self.auto_trim = auto_trim
         self.pool = None
-
-        # Process-local channel support
-        self.receive_buffer = defaultdict(
-            lambda: asyncio.Queue()
-        )  # Dict[channel_name, asyncio.Queue]
-        self._polling_tasks = {}
-        self._active_receivers = defaultdict(int)
-        self.client_prefix = uuid.uuid4().hex
-
-    extensions = ["groups", "flush"]
+        # Get database path from Django settings (db_settings already set by parent)
+        self.db_path = self.db_settings["NAME"]
 
     async def _ensure_pool(self):
         """Ensure the connection pool is initialized."""
@@ -77,16 +69,27 @@ class AioSqliteChannelLayer(BaseChannelLayer):
             async def connection_factory():
                 conn = await aiosqlite.connect(self.db_path)
                 conn.row_factory = aiosqlite.Row
-                # Enable WAL mode and aggressive optimizations
-                await conn.execute("PRAGMA journal_mode=WAL")
-                await conn.execute("PRAGMA synchronous=NORMAL")
-                await conn.execute("PRAGMA cache_size=10000")
-                await conn.execute("PRAGMA temp_store=MEMORY")
-                await conn.execute(
-                    "PRAGMA mmap_size=268435456"
-                )  # 256MB memory-mapped I/O
-                await conn.execute("PRAGMA page_size=4096")
-                await conn.execute("PRAGMA busy_timeout=5000")
+
+                # Check if user provided custom init_command in database OPTIONS
+                init_command = self.db_settings.get("OPTIONS", {}).get("init_command")
+
+                if init_command:
+                    # Use user-provided init commands (supports multiple statements)
+                    await conn.executescript(init_command)
+                else:
+                    # Use default optimized PRAGMA settings
+                    await conn.executescript(
+                        """
+                        PRAGMA journal_mode=WAL;
+                        PRAGMA synchronous=NORMAL;
+                        PRAGMA cache_size=10000;
+                        PRAGMA temp_store=MEMORY;
+                        PRAGMA mmap_size=268435456;
+                        PRAGMA page_size=4096;
+                        PRAGMA busy_timeout=5000;
+                        """
+                    )
+
                 return conn
 
             self.pool = SQLiteConnectionPool(
@@ -132,8 +135,8 @@ class AioSqliteChannelLayer(BaseChannelLayer):
             expires_at = self._to_django_datetime(
                 datetime.now() + timedelta(seconds=self.expiry)
             )
-        # Use msgspec MessagePack for faster encoding
-        data_bytes = msgspec.msgpack.encode(msg_to_send)
+        # Serialize message to bytes
+        data_bytes = self.serialize(msg_to_send)
 
         async with self.pool.connection() as conn:
             await conn.execute(
@@ -221,8 +224,8 @@ class AioSqliteChannelLayer(BaseChannelLayer):
 
                 # Check if update was successful
                 if conn.total_changes > 0:
-                    # Decode MessagePack data
-                    message = msgspec.msgpack.decode(data_json)
+                    # Deserialize message data
+                    message = self.deserialize(data_json)
                     return channel, message
 
             raise ChannelEmpty()
@@ -241,11 +244,6 @@ class AioSqliteChannelLayer(BaseChannelLayer):
             except Exception:
                 # Log error in production, for now just continue
                 await asyncio.sleep(self.polling_interval)
-
-    async def new_channel(self, prefix="specific"):
-        """Create a new process-specific channel name."""
-        self.require_valid_channel_name(prefix, receive=True)
-        return f"{prefix}.{self.client_prefix}!{uuid.uuid4().hex}"
 
     async def _clean_expired(self):
         """Remove expired events and group memberships."""
@@ -274,23 +272,13 @@ class AioSqliteChannelLayer(BaseChannelLayer):
 
     async def close(self):
         """Close the channel layer and clean up resources."""
-        # Cancel all polling tasks
-        for task in self._polling_tasks.values():
-            task.cancel()
-
-        # Wait for tasks to complete
-        if self._polling_tasks:
-            await asyncio.gather(*self._polling_tasks.values(), return_exceptions=True)
-
-        # Close the connection pool
+        # Close the connection pool first
         if self.pool:
             await self.pool.close()
             self.pool = None
 
-        # Clear local state
-        self._polling_tasks.clear()
-        self._active_receivers.clear()
-        self.receive_buffer.clear()
+        # Call parent's close to handle task cancellation and cleanup
+        await super().close()
 
     # Groups extension
 
@@ -368,8 +356,8 @@ class AioSqliteChannelLayer(BaseChannelLayer):
                 msg = deepcopy(message)
                 channel_name = channel
 
-            # Use msgspec MessagePack for faster encoding
-            data_bytes = msgspec.msgpack.encode(msg)
+            # Serialize message to bytes
+            data_bytes = self.serialize(msg)
             events.append((created_at, expiry, channel_name, data_bytes, 0))
 
         # Bulk insert
