@@ -19,8 +19,8 @@ class Event(models.Model):
 
 
 class GroupMembership(models.Model):
-    group_name = models.CharField()
-    channel_name = models.CharField()
+    group_name = models.CharField(max_length=100)
+    channel_name = models.CharField(max_length=100)
     expires_at = models.DateTimeField(db_index=True)
     joined_at = models.DateTimeField(auto_now_add=True)
 

@@ -456,16 +456,171 @@ async def test_group_send_empty(channel_layer):
 
 
 @pytest.mark.asyncio
-async def test_capacity_not_enforced(channel_layer):
+@pytest.mark.asyncio
+async def test_capacity_enforced_on_send(channel_layer):
     """
-    SQLite layer doesn't enforce capacity like Redis does (no ChannelFull exception).
-    This test documents the current behavior.
+    Test that send() raises ChannelFull when channel is at capacity.
     """
-    # Send more than capacity - should not raise
-    await channel_layer.send("test-channel-1", {"type": "test.message"})
-    await channel_layer.send("test-channel-1", {"type": "test.message"})
-    await channel_layer.send("test-channel-1", {"type": "test.message"})
-    await channel_layer.send("test-channel-1", {"type": "test.message"})  # No exception
+    from channels.exceptions import ChannelFull
+
+    # Use a small capacity for testing
+    test_layer = SQLiteChannelLayer(database="default", capacity=3)
+
+    try:
+        # Fill channel to capacity
+        await test_layer.send(
+            "test-channel-full", {"type": "test.message", "text": "1"}
+        )
+        await test_layer.send(
+            "test-channel-full", {"type": "test.message", "text": "2"}
+        )
+        await test_layer.send(
+            "test-channel-full", {"type": "test.message", "text": "3"}
+        )
+
+        # Next send should raise ChannelFull
+        with pytest.raises(ChannelFull):
+            await test_layer.send(
+                "test-channel-full", {"type": "test.message", "text": "4"}
+            )
+
+        # After receiving one message, should be able to send again
+        msg = await test_layer.receive("test-channel-full")
+        assert msg["text"] == "1"
+
+        # Now we can send again
+        await test_layer.send(
+            "test-channel-full", {"type": "test.message", "text": "4"}
+        )
+    finally:
+        await test_layer.flush()
+        await test_layer.close()
+
+
+@pytest.mark.asyncio
+async def test_capacity_enforced_process_specific(channel_layer):
+    """
+    Test that capacity is enforced for process-specific channels.
+    Capacity applies to the prefix (non-local part).
+    """
+    from channels.exceptions import ChannelFull
+
+    test_layer = SQLiteChannelLayer(database="default", capacity=2)
+
+    try:
+        # Create process-specific channels
+        channel1 = await test_layer.new_channel("test")
+        channel2 = await test_layer.new_channel("test")
+
+        # Both share the same prefix, so capacity is shared
+        await test_layer.send(channel1, {"type": "test.message", "text": "1"})
+        await test_layer.send(channel2, {"type": "test.message", "text": "2"})
+
+        # Next send should raise ChannelFull (capacity is 2, shared across prefix)
+        with pytest.raises(ChannelFull):
+            await test_layer.send(channel1, {"type": "test.message", "text": "3"})
+    finally:
+        await test_layer.flush()
+        await test_layer.close()
+
+
+@pytest.mark.asyncio
+async def test_capacity_not_raised_on_group_send(channel_layer):
+    """
+    Test that group_send silently drops messages when channels are over capacity,
+    instead of raising ChannelFull (per spec).
+    """
+    test_layer = SQLiteChannelLayer(database="default", capacity=2)
+
+    try:
+        # Add channels to group
+        await test_layer.group_add("test-group", "channel1")
+        await test_layer.group_add("test-group", "channel2")
+
+        # Fill channel1 to capacity
+        await test_layer.send("channel1", {"type": "test.message", "text": "1"})
+        await test_layer.send("channel1", {"type": "test.message", "text": "2"})
+
+        # group_send should NOT raise, even though channel1 is full
+        # It should silently drop the message for channel1
+        await test_layer.group_send(
+            "test-group", {"type": "test.message", "text": "group"}
+        )
+
+        # channel2 should receive the message
+        msg = await test_layer.receive("channel2")
+        assert msg["text"] == "group"
+
+        # channel1 should not have received it (it was over capacity)
+        # Check that channel1 only has the original 2 messages
+        msg1 = await test_layer.receive("channel1")
+        assert msg1["text"] == "1"
+        msg2 = await test_layer.receive("channel1")
+        assert msg2["text"] == "2"
+
+        # No more messages in channel1
+        with pytest.raises(asyncio.TimeoutError):
+            async with async_timeout.timeout(0.5):
+                await test_layer.receive("channel1")
+    finally:
+        await test_layer.flush()
+        await test_layer.close()
+
+
+@pytest.mark.asyncio
+async def test_channel_specific_capacity_enforcement(channel_layer):
+    """
+    Test that channel-specific capacity overrides work correctly.
+    The fixture configures channel_capacity={"tiny*": 1}
+    """
+    from channels.exceptions import ChannelFull
+
+    # Send to tiny channel (capacity 1)
+    await channel_layer.send("tiny-channel", {"type": "test.message", "text": "1"})
+
+    # Second send should raise ChannelFull
+    with pytest.raises(ChannelFull):
+        await channel_layer.send("tiny-channel", {"type": "test.message", "text": "2"})
+
+    # Normal channel should allow more (capacity 100)
+    for i in range(10):
+        await channel_layer.send(
+            "normal-channel", {"type": "test.message", "text": str(i)}
+        )
+
+
+@pytest.mark.asyncio
+async def test_capacity_enforcement_can_be_disabled(channel_layer):
+    """
+    Test that capacity enforcement can be disabled with enforce_capacity=False.
+    """
+    from channels.exceptions import ChannelFull
+
+    # Create layer with enforcement disabled
+    test_layer = SQLiteChannelLayer(
+        database="default", capacity=2, enforce_capacity=False
+    )
+
+    try:
+        # Fill beyond capacity - should NOT raise since enforcement is disabled
+        await test_layer.send("test-channel", {"type": "test.message", "text": "1"})
+        await test_layer.send("test-channel", {"type": "test.message", "text": "2"})
+        await test_layer.send("test-channel", {"type": "test.message", "text": "3"})
+        await test_layer.send("test-channel", {"type": "test.message", "text": "4"})
+
+        # All messages should be in DB
+        msg1 = await test_layer.receive("test-channel")
+        msg2 = await test_layer.receive("test-channel")
+        msg3 = await test_layer.receive("test-channel")
+        msg4 = await test_layer.receive("test-channel")
+
+        assert msg1["text"] == "1"
+        assert msg2["text"] == "2"
+        assert msg3["text"] == "3"
+        assert msg4["text"] == "4"
+    finally:
+        await test_layer.flush()
+        await test_layer.close()
 
 
 @pytest.mark.parametrize("layer_type", ["django_orm", "aiosqlite"])
@@ -579,6 +734,8 @@ async def test_channel_specific_capacity(channel_layer):
 @pytest.mark.asyncio
 async def test_channel_specific_capacity_with_named_channels(channel_layer):
     """Test channel-specific capacity with named/specific channels (non-process-local)."""
+    from channels.exceptions import ChannelFull
+
     # The fixture configures channel_capacity={"tiny*": 1}
 
     # Test with a specific named channel matching the pattern
@@ -589,36 +746,32 @@ async def test_channel_specific_capacity_with_named_channels(channel_layer):
     assert channel_layer.get_capacity(tiny_specific_channel) == 1
     assert channel_layer.get_capacity(normal_specific_channel) == 100
 
-    # Note: For non-process-local channels (without "!"), the channel layer uses
-    # direct database polling in receive(), not the buffer mechanism.
-    # So we test the capacity detection but not buffer behavior for these.
-
-    # Send messages to the tiny specific channel
+    # Send one message to the tiny specific channel (capacity 1)
     await channel_layer.send(tiny_specific_channel, {"type": "message.1"})
-    await channel_layer.send(tiny_specific_channel, {"type": "message.2"})
-    await channel_layer.send(tiny_specific_channel, {"type": "message.3"})
 
-    # All messages are stored in the database for specific channels
-    # (capacity is only enforced in the receive buffer for process-local channels)
+    # Second send should raise ChannelFull since capacity is 1
+    with pytest.raises(ChannelFull):
+        await channel_layer.send(tiny_specific_channel, {"type": "message.2"})
+
+    # Receive the first message
     message1 = await channel_layer.receive(tiny_specific_channel)
-    message2 = await channel_layer.receive(tiny_specific_channel)
-    message3 = await channel_layer.receive(tiny_specific_channel)
-
     assert message1["type"] == "message.1"
+
+    # Now we can send again since capacity is available
+    await channel_layer.send(tiny_specific_channel, {"type": "message.2"})
+    message2 = await channel_layer.receive(tiny_specific_channel)
     assert message2["type"] == "message.2"
-    assert message3["type"] == "message.3"
 
     # Verify no more messages
     with pytest.raises(asyncio.TimeoutError):
         async with async_timeout.timeout(0.5):
             await channel_layer.receive(tiny_specific_channel)
 
-    # Test with normal specific channel
-    await channel_layer.send(normal_specific_channel, {"type": "test.1"})
-    await channel_layer.send(normal_specific_channel, {"type": "test.2"})
+    # Test with normal specific channel (capacity 100)
+    for i in range(10):
+        await channel_layer.send(normal_specific_channel, {"type": f"test.{i}"})
 
-    msg1 = await channel_layer.receive(normal_specific_channel)
-    msg2 = await channel_layer.receive(normal_specific_channel)
-
-    assert msg1["type"] == "test.1"
-    assert msg2["type"] == "test.2"
+    # Receive all messages
+    for i in range(10):
+        msg = await channel_layer.receive(normal_specific_channel)
+        assert msg["type"] == f"test.{i}"

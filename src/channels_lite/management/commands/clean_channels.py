@@ -82,6 +82,7 @@ class Command(BaseCommand):
             self.stdout.write(f"  Database: {db_alias}")
 
         elif isinstance(channel_layer, AIOSQLiteChannelLayer):
+
             async def _async_vacuum():
                 async with channel_layer.connection() as conn:
                     await conn.execute("VACUUM")
@@ -89,4 +90,3 @@ class Command(BaseCommand):
 
             async_to_sync(_async_vacuum)()
             self.stdout.write(f"  Database: {channel_layer.db_path}")
-

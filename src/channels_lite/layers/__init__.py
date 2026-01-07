@@ -9,7 +9,7 @@ import uuid
 from collections import defaultdict
 from copy import deepcopy
 
-from channels.exceptions import InvalidChannelLayerError
+from channels.exceptions import InvalidChannelLayerError, ChannelFull
 from channels.layers import BaseChannelLayer
 from django.conf import settings
 
@@ -55,6 +55,7 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         polling_interval=0.1,
         polling_idle_timeout=1800,
         auto_trim=True,
+        enforce_capacity=True,
         serializer_format="json",
         symmetric_encryption_keys=None,
         **kwargs,
@@ -85,6 +86,7 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self.polling_interval = polling_interval
         self.polling_idle_timeout = polling_idle_timeout
         self.auto_trim = auto_trim
+        self.enforce_capacity = enforce_capacity
         self.capacity = capacity
         self.channel_capacity = self.compile_capacities(channel_capacity or {})
 
@@ -242,6 +244,22 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         """
         raise NotImplementedError("Subclasses must implement _receive_single_from_db")
 
+    async def _get_channel_pending_count(self, channel):
+        """
+        Get the number of pending (undelivered) messages for a channel.
+
+        This is an abstract method that must be implemented by subclasses.
+
+        Args:
+            channel: The channel name to check
+
+        Returns:
+            int: Number of pending messages
+        """
+        raise NotImplementedError(
+            "Subclasses must implement _get_channel_pending_count"
+        )
+
     async def clean_expired(self):
         """
         Remove expired events and group memberships.
@@ -255,12 +273,15 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
 
     # Helper methods for common send/receive patterns
 
-    def _prepare_message_for_send(self, channel, message):
+    async def _prepare_message_for_send(self, channel, message):
         """
         Validate and prepare message for sending.
 
         Returns:
             tuple: (channel_non_local_name, prepared_message)
+
+        Raises:
+            ChannelFull: If the channel is at or over capacity
         """
         # Validation
         assert isinstance(message, dict), "message is not a dict"
@@ -275,6 +296,15 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         if "!" in channel:
             prepared_message["__asgi_channel__"] = channel
             channel_non_local_name = self.non_local_name(channel)
+
+        # Check capacity (if enforcement is enabled)
+        if self.enforce_capacity:
+            capacity = self.get_capacity(channel)
+            pending_count = await self._get_channel_pending_count(
+                channel_non_local_name
+            )
+            if pending_count >= capacity:
+                raise ChannelFull(f"Channel {channel} is at capacity ({capacity})")
 
         return channel_non_local_name, prepared_message
 

@@ -17,7 +17,7 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
         """
         Send a message onto a (general or specific) channel.
         """
-        channel_non_local_name, prepared_message = self._prepare_message_for_send(
+        channel_non_local_name, prepared_message = await self._prepare_message_for_send(
             channel, message
         )
         data_bytes = self.serialize(prepared_message)
@@ -50,6 +50,16 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
                 return full_channel, message
 
         raise ChannelEmpty()
+
+    async def _get_channel_pending_count(self, channel):
+        """
+        Get the number of pending (undelivered) messages for a channel.
+        """
+        return await Event.objects.filter(
+            channel_name=channel,
+            delivered=False,
+            expires_at__gte=timezone.now(),
+        ).acount()
 
     # Expire cleanup
 
@@ -146,6 +156,14 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
             else:
                 msg_to_send = message
                 channel_name = channel
+
+            # Check capacity - silently drop if over capacity (per spec)
+            # Only check if enforce_capacity is enabled
+            if self.enforce_capacity:
+                capacity = self.get_capacity(channel)
+                pending_count = await self._get_channel_pending_count(channel_name)
+                if pending_count >= capacity:
+                    continue
 
             data_bytes = self.serialize(msg_to_send)
             events.append(

@@ -85,7 +85,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def send(self, channel, message, expiry=None):
         """Send a message onto a (general or specific) channel."""
-        channel_non_local_name, prepared_message = self._prepare_message_for_send(
+        channel_non_local_name, prepared_message = await self._prepare_message_for_send(
             channel, message
         )
         data_bytes = self.serialize(prepared_message)
@@ -139,6 +139,20 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                     return full_channel, message
 
             raise ChannelEmpty()
+
+    async def _get_channel_pending_count(self, channel):
+        """Get the number of pending (undelivered) messages for a channel."""
+        async with self.connection() as conn:
+            now = self._to_django_datetime()
+            cursor = await conn.execute(
+                """
+                SELECT COUNT(*) FROM channels_lite_event
+                WHERE channel_name = ? AND delivered = 0 AND expires_at >= ?
+                """,
+                (channel, now),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else 0
 
     async def clean_expired(self):
         """Remove expired events and group memberships."""
@@ -268,6 +282,14 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             else:
                 msg_to_send = message
                 channel_name = channel
+
+            # Check capacity - silently drop if over capacity (per spec)
+            # Only check if enforce_capacity is enabled
+            if self.enforce_capacity:
+                capacity = self.get_capacity(channel)
+                pending_count = await self._get_channel_pending_count(channel_name)
+                if pending_count >= capacity:
+                    continue
 
             # Serialize message to bytes
             data_bytes = self.serialize(msg_to_send)
