@@ -8,7 +8,7 @@
 
 Django Channels layer backed by SQLite database.
 
-**channels-lite** provides Django Channels channel layers that use SQLite as a backing store, eliminating the need for Redis infrastructure. Perfect for small to medium Django applications, development environments, or deployments where simplicity is valued.
+**channels-lite** provides Django Channels channel layers that use SQLite as a backing store, eliminating the need for Redis infrastructure.
 
 There are two available implementations:
 
