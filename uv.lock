@@ -280,7 +280,7 @@ types = [
 
 [[package]]
 name = "channels-lite"
-version = "0.3.2"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "channels", extra = ["daphne", "types"] },

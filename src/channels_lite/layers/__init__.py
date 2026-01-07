@@ -2,11 +2,9 @@
 Base channel layer implementation for SQLite-based layers.
 """
 
-import time
 import asyncio
 import random
 import uuid
-from collections import defaultdict
 from copy import deepcopy
 
 from channels.exceptions import InvalidChannelLayerError, ChannelFull
@@ -20,20 +18,6 @@ class ChannelEmpty(Exception):
     """Exception raised when a channel is empty."""
 
     pass
-
-
-class BoundedQueue(asyncio.Queue):
-    """
-    A queue that drops the oldest message when full.
-
-    This prevents unbounded memory growth when consumers stop reading.
-    """
-
-    def put_nowait(self, item):
-        if self.full():
-            # Drop the oldest message to make room
-            self.get_nowait()
-        return super().put_nowait(item)
 
 
 class BaseSQLiteChannelLayer(BaseChannelLayer):
@@ -92,10 +76,6 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
 
         # Process-local channel support
         self.client_prefix = uuid.uuid4().hex
-        self.receive_buffer = {}
-        self._polling_tasks = {}
-        self._polling_locks = defaultdict(asyncio.Lock)  # Lock per prefix
-        self._active_receivers = defaultdict(int)
 
         # Event loop tracking for receive (single event loop enforcement)
         # Follows the pattern from channels_redis.core.RedisChannelLayer
@@ -119,36 +99,25 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         return f"{prefix}.{self.client_prefix}!{uuid.uuid4().hex}"
 
     async def close(self):
-        """Clean up any running background polling tasks."""
-        # Cancel all polling tasks
-        for task in list(self._polling_tasks.values()):
-            task.cancel()
-
-        # Wait for all tasks to complete cancellation
-        if self._polling_tasks:
-            await asyncio.gather(*self._polling_tasks.values(), return_exceptions=True)
-
-        # Clear tracking dictionaries
-        self._polling_tasks.clear()
-        self._active_receivers.clear()
-        self.receive_buffer.clear()
+        """Clean up channel layer resources."""
+        # Reset event loop tracking
+        self.receive_count = 0
+        self.receive_event_loop = None
 
     async def receive(self, channel):
         """
         Receive the first message that arrives on the channel.
-        If more than one coroutine is waiting, lock and start poll and distribute task
+        Uses direct database polling for all channel types.
         """
-
         self.require_valid_channel_name(channel)
         real_channel = channel
 
-        # For process-specific channels, use buffering mechanism
+        # For process-specific channels, verify client prefix
         if "!" in channel:
             real_channel = self.non_local_name(channel)
             assert real_channel.endswith(self.client_prefix + "!"), (
                 "Wrong client prefix"
             )
-            prefix = real_channel
 
             # Enforce single event loop for receive
             # Follows the pattern from channels_redis.core.RedisChannelLayer
@@ -168,22 +137,16 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                             "Use async_to_sync() only for send/group_send operations."
                         )
 
-                self._active_receivers[prefix] += 1
-
-                try:
-                    # Start polling task if not already running (with lock to prevent races)
-                    async with self._polling_locks[prefix]:
-                        if prefix not in self._polling_tasks:
-                            self._polling_tasks[prefix] = asyncio.create_task(
-                                self._poll_and_distribute(prefix)
-                            )
-                    buff = self.receive_buffer.get(channel)
-                    if buff is None:
-                        buff = BoundedQueue(maxsize=self.get_capacity(channel))
-                        self.receive_buffer[channel] = buff
-                    return await buff.get()
-                finally:
-                    self._active_receivers[prefix] -= 1
+                # Direct polling loop
+                while True:
+                    try:
+                        _, message = await self._receive_single_from_db(real_channel)
+                        return message
+                    except ChannelEmpty:
+                        # No message available, occasionally run cleanup and sleep
+                        if self.auto_trim and random.random() < 0.01:
+                            await self.clean_expired()
+                        await asyncio.sleep(self.polling_interval)
 
             finally:
                 self.receive_count -= 1
@@ -201,61 +164,6 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                 if self.auto_trim and random.random() < 0.01:
                     await self.clean_expired()
                 await asyncio.sleep(self.polling_interval)
-
-    async def _poll_and_distribute(self, prefix):
-        """
-        Background task that polls the database for messages on a given prefix
-        and distributes them to the appropriate channel buffers.
-
-        Auto-shuts down after polling_idle_timeout seconds of inactivity (no receivers + no messages).
-
-        This method should be called by concrete implementations.
-        """
-
-        last_activity = time.time()
-
-        try:
-            while True:
-                # Check shutdown condition: no active receivers and idle timeout exceeded
-                if (
-                    self._active_receivers[prefix] == 0
-                    and time.time() - last_activity > self.polling_idle_timeout
-                ):
-                    # Clean up and exit
-                    if prefix in self._polling_tasks:
-                        del self._polling_tasks[prefix]
-                    if prefix in self._active_receivers:
-                        del self._active_receivers[prefix]
-                    if prefix in self._polling_locks:
-                        del self._polling_locks[prefix]
-                    return
-
-                try:
-                    # Pull one message from database
-                    # Subclasses implement _receive_single_from_db
-                    msg_channel, message = await self._receive_single_from_db(prefix)
-
-                    # Route to the appropriate buffer based on full channel name
-                    buff = self.receive_buffer.get(msg_channel)
-                    if buff is None:
-                        buff = BoundedQueue(maxsize=self.get_capacity(msg_channel))
-                        self.receive_buffer[msg_channel] = buff
-                    await buff.put(message)
-                    last_activity = time.time()  # Reset idle timer
-
-                except ChannelEmpty:
-                    # No message available, occasionally run cleanup and sleep
-                    if self.auto_trim and random.random() < 0.01:
-                        await self.clean_expired()
-                    await asyncio.sleep(self.polling_interval)
-
-        except asyncio.CancelledError:
-            # Task was cancelled, clean up
-            if prefix in self._polling_tasks:
-                del self._polling_tasks[prefix]
-            if prefix in self._polling_locks:
-                del self._polling_locks[prefix]
-            raise
 
     async def _receive_single_from_db(self, channel):
         """

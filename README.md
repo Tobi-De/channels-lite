@@ -1,8 +1,10 @@
 # channels-lite
 
-![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
-![Python](https://img.shields.io/badge/python-3.12+-blue)
-![Django](https://img.shields.io/badge/django-4.2--6.0-green)
+[![PyPI - Version](https://img.shields.io/pypi/v/channels-lite.svg)](https://pypi.org/project/channels-lite)
+[![PyPI - Python Version](https://img.shields.io/pypi/pyversions/channels-lite.svg)](https://pypi.org/project/channels-lite)
+[![PyPI - Versions from Framework Classifiers](https://img.shields.io/pypi/frameworkversions/django/channels-lite)](https://pypi.org/project/channels-lite/)
+[![MIT License](https://img.shields.io/badge/license-MIT-blue.svg)](https://github.com/Tobi-De/channels-lite/blob/main/LICENSE.txt)
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 Django Channels layer backed by SQLite database.
 

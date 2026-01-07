@@ -3,8 +3,6 @@ Parametrized tests for all channel layer implementations.
 Ensures both Django ORM and aiosqlite layers are spec-compliant.
 """
 
-from channels_lite.layers import BoundedQueue
-
 import asyncio
 import random
 
@@ -430,32 +428,12 @@ async def test_process_local_channel_prefix(channel_layer):
 
 
 @pytest.mark.asyncio
-async def test_polling_task_lifecycle(channel_layer):
-    """Test that polling tasks start and stop correctly."""
-    channel_name = await channel_layer.new_channel()
-
-    # Send and receive to start polling task
-    await channel_layer.send(channel_name, {"type": "test.message"})
-    message = await channel_layer.receive(channel_name)
-    assert message["type"] == "test.message"
-
-    # Verify polling task was created
-    prefix = channel_layer.non_local_name(channel_name)
-    assert prefix in channel_layer._polling_tasks
-
-    # Close should cancel polling tasks
-    await channel_layer.close()
-    assert len(channel_layer._polling_tasks) == 0
-
-
-@pytest.mark.asyncio
 async def test_group_send_empty(channel_layer):
     """Test that sending to an empty group doesn't error."""
     await channel_layer.group_send("empty-group", {"type": "test.message"})
     # Should not raise an error
 
 
-@pytest.mark.asyncio
 @pytest.mark.asyncio
 async def test_capacity_enforced_on_send(channel_layer):
     """
@@ -660,32 +638,9 @@ def test_repeated_group_send_with_async_to_sync(channel_layer):
         async_to_sync(channel_layer.close)()
 
 
-async def test_receive_buffer_respects_capacity(channel_layer):
-    """Test that BoundedQueue respects capacity and drops oldest messages."""
-    try:
-        buff = BoundedQueue(channel_layer.capacity)
-        channel_layer.receive_buffer["test-channel"] = buff
-
-        # Add way more messages than capacity
-        for i in range(10000):
-            buff.put_nowait(i)
-
-        capacity = 100
-        assert channel_layer.capacity == capacity
-        assert buff.full() is True
-        assert buff.qsize() == capacity
-
-        # Should only have the last 100 messages (9900-9999)
-        # because BoundedQueue drops oldest when full
-        messages = [buff.get_nowait() for _ in range(capacity)]
-        assert list(range(9900, 10000)) == messages
-    finally:
-        await channel_layer.close()
-
-
 @pytest.mark.asyncio
 async def test_channel_specific_capacity(channel_layer):
-    """Test that channel-specific capacity limits work correctly."""
+    """Test that channel-specific capacity configuration works correctly."""
     # The fixture configures channel_capacity={"tiny*": 1}
     # This means channels matching "tiny*" (glob pattern) should have capacity of 1
 
@@ -699,36 +654,8 @@ async def test_channel_specific_capacity(channel_layer):
     # Check that normal channel has default capacity of 100
     assert channel_layer.get_capacity(normal_channel) == 100
 
-    # Test that the buffer respects channel-specific capacity
-    # Create a buffer for the tiny channel and fill it beyond capacity
-    buff = BoundedQueue(maxsize=channel_layer.get_capacity(tiny_channel))
-    channel_layer.receive_buffer[tiny_channel] = buff
-
-    # Add more messages than capacity
-    for i in range(10):
-        buff.put_nowait({"type": f"message.{i}"})
-
-    # Should only have 1 message (the last one) because capacity is 1
-    assert buff.qsize() == 1
-    message = buff.get_nowait()
-    assert message["type"] == "message.9"
-
-    # Verify buffer is now empty
-    assert buff.empty()
-
-    # Test with normal channel buffer (capacity 100)
-    buff_normal = BoundedQueue(maxsize=channel_layer.get_capacity(normal_channel))
-    channel_layer.receive_buffer[normal_channel] = buff_normal
-
-    # Add 10 messages (well under capacity of 100)
-    for i in range(10):
-        buff_normal.put_nowait({"type": f"message.{i}"})
-
-    # All 10 messages should be available
-    assert buff_normal.qsize() == 10
-    for i in range(10):
-        message = buff_normal.get_nowait()
-        assert message["type"] == f"message.{i}"
+    # Note: Capacity enforcement is tested in test_capacity_enforced_on_send
+    # and test_capacity_enforced_process_specific which test the actual API behavior
 
 
 @pytest.mark.asyncio

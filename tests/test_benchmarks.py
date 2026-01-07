@@ -111,7 +111,10 @@ def test_benchmark_point_to_point_aiosqlite(benchmark):
     async def run_benchmark():
         # Use the Django test database
         layer = AIOSQLiteChannelLayer(
-            database="default", capacity=10000, auto_trim=False, enforce_capacity=False,
+            database="default",
+            capacity=10000,
+            auto_trim=False,
+            enforce_capacity=False,
         )
         channel_name = "benchmark-channel-aio"
 
