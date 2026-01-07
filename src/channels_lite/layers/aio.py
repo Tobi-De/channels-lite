@@ -42,16 +42,42 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         """
         Context manager that ensures pool is initialized and returns a connection.
         """
-        if self.pool is None:
+        # if self.pool is None:
 
-            async def connection_factory():
-                conn = await aiosqlite.connect(self.db_path)
-                conn.row_factory = aiosqlite.Row
+        #     async def connection_factory():
+        #         conn = await aiosqlite.connect(self.db_path)
+        #         conn.row_factory = aiosqlite.Row
 
-                # Check if user provided custom init_command in database OPTIONS
-                init_command = self.db_settings.get("OPTIONS", {}).get(
-                    "init_command",
-                    """
+        #         # Check if user provided custom init_command in database OPTIONS
+        #         init_command = self.db_settings.get("OPTIONS", {}).get(
+        #             "init_command",
+        #             """
+        #             PRAGMA journal_mode=WAL;
+        #             PRAGMA synchronous=NORMAL;
+        #             PRAGMA cache_size=10000;
+        #             PRAGMA temp_store=MEMORY;
+        #             PRAGMA mmap_size=268435456;
+        #             PRAGMA page_size=4096;
+        #             PRAGMA busy_timeout=5000;
+        #             """,
+        #         )
+
+        #         await conn.executescript(init_command)
+        #         return conn
+
+        #     self.pool = SQLiteConnectionPool(
+        #         connection_factory, pool_size=self.pool_size
+        #     )
+
+        # async with self.pool.connection() as conn:
+        #     yield conn
+        async with aiosqlite.connect(self.db_path) as conn:
+            conn.row_factory = aiosqlite.Row
+
+            # Check if user provided custom init_command in database OPTIONS
+            init_command = self.db_settings.get("OPTIONS", {}).get(
+                "init_command",
+                """
                     PRAGMA journal_mode=WAL;
                     PRAGMA synchronous=NORMAL;
                     PRAGMA cache_size=10000;
@@ -60,16 +86,9 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                     PRAGMA page_size=4096;
                     PRAGMA busy_timeout=5000;
                     """,
-                )
-
-                await conn.executescript(init_command)
-                return conn
-
-            self.pool = SQLiteConnectionPool(
-                connection_factory, pool_size=self.pool_size
             )
 
-        async with self.pool.connection() as conn:
+            await conn.executescript(init_command)
             yield conn
 
     def _to_django_datetime(self, dt=None):
@@ -121,7 +140,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                 )
                 row = await cursor.fetchone()
                 pending_count = row[0] if row else 0
-                
+
                 if pending_count >= capacity:
                     raise ChannelFull(f"Channel {channel} is at capacity ({capacity})")
 
@@ -283,7 +302,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
         async with self.connection() as conn:
             now = self._to_django_datetime()
-            
+
             # Get all channels in the group
             cursor = await conn.execute(
                 """
@@ -329,7 +348,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                     )
                     row = await cursor.fetchone()
                     pending_count = row[0] if row else 0
-                    
+
                     if pending_count >= capacity:
                         channels_over_capacity += 1
                         continue
