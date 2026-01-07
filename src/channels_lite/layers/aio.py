@@ -26,58 +26,32 @@ from channels.exceptions import ChannelFull
 from . import BaseSQLiteChannelLayer, ChannelEmpty
 
 
-class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
+class SQLiteLoopLayer:
     """
-    Channel layer backed by SQLite using aiosqlite and connection pooling.
+    Per-event-loop state container for AIOSQLiteChannelLayer.
+
+    Each event loop gets its own instance with isolated pool and locks.
+    This pattern follows channels_redis.core.RedisLoopLayer.
     """
 
-    def __init__(self, *, serializer_format="msgpack", pool_size=10, **kwargs):
-        super().__init__(serializer_format=serializer_format, **kwargs)
-        self.pool_size = pool_size
+    def __init__(self, channel_layer):
+        self._lock = asyncio.Lock()
+        self.channel_layer = channel_layer
         self.pool = None
-        self.db_path = self.db_settings["NAME"]
 
-    @asynccontextmanager
-    async def connection(self):
+    async def get_pool(self):
         """
-        Context manager that ensures pool is initialized and returns a connection.
+        Lazily create the connection pool for this event loop.
         """
-        # if self.pool is None:
+        if self.pool is None:
+            async def connection_factory():
+                conn = await aiosqlite.connect(self.channel_layer.db_path)
+                conn.row_factory = aiosqlite.Row
 
-        #     async def connection_factory():
-        #         conn = await aiosqlite.connect(self.db_path)
-        #         conn.row_factory = aiosqlite.Row
-
-        #         # Check if user provided custom init_command in database OPTIONS
-        #         init_command = self.db_settings.get("OPTIONS", {}).get(
-        #             "init_command",
-        #             """
-        #             PRAGMA journal_mode=WAL;
-        #             PRAGMA synchronous=NORMAL;
-        #             PRAGMA cache_size=10000;
-        #             PRAGMA temp_store=MEMORY;
-        #             PRAGMA mmap_size=268435456;
-        #             PRAGMA page_size=4096;
-        #             PRAGMA busy_timeout=5000;
-        #             """,
-        #         )
-
-        #         await conn.executescript(init_command)
-        #         return conn
-
-        #     self.pool = SQLiteConnectionPool(
-        #         connection_factory, pool_size=self.pool_size
-        #     )
-
-        # async with self.pool.connection() as conn:
-        #     yield conn
-        async with aiosqlite.connect(self.db_path) as conn:
-            conn.row_factory = aiosqlite.Row
-
-            # Check if user provided custom init_command in database OPTIONS
-            init_command = self.db_settings.get("OPTIONS", {}).get(
-                "init_command",
-                """
+                # Check if user provided custom init_command in database OPTIONS
+                init_command = self.channel_layer.db_settings.get("OPTIONS", {}).get(
+                    "init_command",
+                    """
                     PRAGMA journal_mode=WAL;
                     PRAGMA synchronous=NORMAL;
                     PRAGMA cache_size=10000;
@@ -86,9 +60,54 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
                     PRAGMA page_size=4096;
                     PRAGMA busy_timeout=5000;
                     """,
+                )
+
+                await conn.executescript(init_command)
+                return conn
+
+            self.pool = SQLiteConnectionPool(
+                connection_factory, pool_size=self.channel_layer.pool_size
             )
 
-            await conn.executescript(init_command)
+        return self.pool
+
+    async def close(self):
+        """Close the connection pool for this event loop."""
+        if self.pool:
+            await self.pool.close()
+            self.pool = None
+
+
+class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
+    """
+    Channel layer backed by SQLite using aiosqlite and connection pooling.
+    """
+
+    def __init__(self, *, serializer_format="msgpack", pool_size=10, **kwargs):
+        super().__init__(serializer_format=serializer_format, **kwargs)
+        self.pool_size = pool_size
+        self.db_path = self.db_settings["NAME"]
+        # Per-event-loop state (pools, locks, etc.)
+        # Follows the pattern from channels_redis.core.RedisChannelLayer
+        self._layers = {}
+
+    def _get_layer(self):
+        """
+        Get or create the SQLiteLoopLayer for the current event loop.
+        """
+        loop = asyncio.get_running_loop()
+        if loop not in self._layers:
+            self._layers[loop] = SQLiteLoopLayer(self)
+        return self._layers[loop]
+
+    @asynccontextmanager
+    async def connection(self):
+        """
+        Context manager that returns a connection from the current event loop's pool.
+        """
+        layer = self._get_layer()
+        pool = await layer.get_pool()
+        async with pool.connection() as conn:
             yield conn
 
     def _to_django_datetime(self, dt=None):
@@ -254,10 +273,12 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         # Call parent's close first to cancel polling tasks
         await super().close()
 
-        if self.pool:
-            await self.pool.close()
-            await asyncio.sleep(0.05)
-            self.pool = None
+        # Close all per-event-loop pools
+        for layer in list(self._layers.values()):
+            await layer.close()
+
+        # Clear the layers dict
+        self._layers.clear()
 
     # Groups extension
 

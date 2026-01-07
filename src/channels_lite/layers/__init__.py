@@ -97,6 +97,11 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self._polling_locks = defaultdict(asyncio.Lock)  # Lock per prefix
         self._active_receivers = defaultdict(int)
 
+        # Event loop tracking for receive (single event loop enforcement)
+        # Follows the pattern from channels_redis.core.RedisChannelLayer
+        self.receive_count = 0
+        self.receive_event_loop = None
+
         # Serialization
         self._serializer = registry.get_serializer(
             serializer_format,
@@ -144,22 +149,47 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
                 "Wrong client prefix"
             )
             prefix = real_channel
-            self._active_receivers[prefix] += 1
+
+            # Enforce single event loop for receive
+            # Follows the pattern from channels_redis.core.RedisChannelLayer
+            loop = asyncio.get_running_loop()
+            self.receive_count += 1
 
             try:
-                # Start polling task if not already running (with lock to prevent races)
-                async with self._polling_locks[prefix]:
-                    if prefix not in self._polling_tasks:
-                        self._polling_tasks[prefix] = asyncio.create_task(
-                            self._poll_and_distribute(prefix)
+                if self.receive_count == 1:
+                    # First receiver - record the event loop
+                    self.receive_event_loop = loop
+                else:
+                    # Subsequent receivers - verify same event loop
+                    if self.receive_event_loop != loop:
+                        raise RuntimeError(
+                            "Cannot receive on process-specific channels from multiple event loops. "
+                            "This typically happens when using async_to_sync() with receive(). "
+                            "Use async_to_sync() only for send/group_send operations."
                         )
-                buff = self.receive_buffer.get(channel)
-                if buff is None:
-                    buff = BoundedQueue(maxsize=self.get_capacity(channel))
-                    self.receive_buffer[channel] = buff
-                return await buff.get()
+
+                self._active_receivers[prefix] += 1
+
+                try:
+                    # Start polling task if not already running (with lock to prevent races)
+                    async with self._polling_locks[prefix]:
+                        if prefix not in self._polling_tasks:
+                            self._polling_tasks[prefix] = asyncio.create_task(
+                                self._poll_and_distribute(prefix)
+                            )
+                    buff = self.receive_buffer.get(channel)
+                    if buff is None:
+                        buff = BoundedQueue(maxsize=self.get_capacity(channel))
+                        self.receive_buffer[channel] = buff
+                    return await buff.get()
+                finally:
+                    self._active_receivers[prefix] -= 1
+
             finally:
-                self._active_receivers[prefix] -= 1
+                self.receive_count -= 1
+                # If we're the last receiver, clear the event loop tracking
+                if self.receive_count == 0:
+                    self.receive_event_loop = None
 
         # For normal channels, use direct polling
         while True:
