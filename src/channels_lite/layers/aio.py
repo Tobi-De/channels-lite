@@ -21,6 +21,8 @@ except ImportError as e:
         "Install them with: pip install channels-lite[aio]"
     ) from e
 
+from channels.exceptions import ChannelFull
+
 from . import BaseSQLiteChannelLayer, ChannelEmpty
 
 
@@ -85,9 +87,20 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def send(self, channel, message, expiry=None):
         """Send a message onto a (general or specific) channel."""
-        channel_non_local_name, prepared_message = await self._prepare_message_for_send(
-            channel, message
-        )
+        # Validate and prepare message (without capacity check)
+        assert isinstance(message, dict), "message is not a dict"
+        self.require_valid_channel_name(channel)
+        assert "__asgi_channel__" not in message
+
+        # Prepare message
+        channel_non_local_name = channel
+        prepared_message = message.copy()
+
+        # Handle process-local channels
+        if "!" in channel:
+            prepared_message["__asgi_channel__"] = channel
+            channel_non_local_name = self.non_local_name(channel)
+
         data_bytes = self.serialize(prepared_message)
         created_at = self._to_django_datetime()
         expires_at = self._to_django_datetime(
@@ -95,6 +108,23 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         )
 
         async with self.connection() as conn:
+            # Check capacity (if enforcement is enabled)
+            if self.enforce_capacity:
+                capacity = self.get_capacity(channel)
+                now = self._to_django_datetime()
+                cursor = await conn.execute(
+                    """
+                    SELECT COUNT(*) FROM channels_lite_event
+                    WHERE channel_name = ? AND delivered = 0 AND expires_at >= ?
+                    """,
+                    (channel_non_local_name, now),
+                )
+                row = await cursor.fetchone()
+                pending_count = row[0] if row else 0
+                
+                if pending_count >= capacity:
+                    raise ChannelFull(f"Channel {channel} is at capacity ({capacity})")
+
             await conn.execute(
                 """
                 INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
@@ -251,9 +281,10 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         assert isinstance(message, dict), "Message is not a dict"
         self.require_valid_group_name(group)
 
-        # Get all channels in the group
         async with self.connection() as conn:
             now = self._to_django_datetime()
+            
+            # Get all channels in the group
             cursor = await conn.execute(
                 """
                 SELECT channel_name FROM channels_lite_groupmembership
@@ -263,41 +294,52 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             )
             channels = [row[0] for row in await cursor.fetchall()]
 
-        if not channels:
-            return
+            if not channels:
+                return
 
-        # Prepare events for bulk insert
-        created_at = self._to_django_datetime()
-        expiry = self._to_django_datetime(
-            datetime.now() + timedelta(seconds=self.expiry)
-        )
-        events = []
+            # Prepare events for bulk insert
+            created_at = self._to_django_datetime()
+            expiry = self._to_django_datetime(
+                datetime.now() + timedelta(seconds=self.expiry)
+            )
+            events = []
+            channels_over_capacity = 0
 
-        for channel in channels:
-            # Handle process-local channels
-            if "!" in channel:
-                msg_to_send = message.copy()
-                msg_to_send["__asgi_channel__"] = channel
-                channel_name = self.non_local_name(channel)
-            else:
-                msg_to_send = message
-                channel_name = channel
+            for channel in channels:
+                # Handle process-local channels
+                if "!" in channel:
+                    msg_to_send = message.copy()
+                    msg_to_send["__asgi_channel__"] = channel
+                    channel_name = self.non_local_name(channel)
+                else:
+                    msg_to_send = message
+                    channel_name = channel
 
-            # Check capacity - silently drop if over capacity (per spec)
-            # Only check if enforce_capacity is enabled
-            if self.enforce_capacity:
-                capacity = self.get_capacity(channel)
-                pending_count = await self._get_channel_pending_count(channel_name)
-                if pending_count >= capacity:
-                    continue
+                # Check capacity - silently drop if over capacity (per spec)
+                # Only check if enforce_capacity is enabled
+                if self.enforce_capacity:
+                    capacity = self.get_capacity(channel)
+                    # Check capacity using the same connection
+                    cursor = await conn.execute(
+                        """
+                        SELECT COUNT(*) FROM channels_lite_event
+                        WHERE channel_name = ? AND delivered = 0 AND expires_at >= ?
+                        """,
+                        (channel_name, now),
+                    )
+                    row = await cursor.fetchone()
+                    pending_count = row[0] if row else 0
+                    
+                    if pending_count >= capacity:
+                        channels_over_capacity += 1
+                        continue
 
-            # Serialize message to bytes
-            data_bytes = self.serialize(msg_to_send)
-            events.append((created_at, expiry, channel_name, data_bytes, 0))
+                # Serialize message to bytes
+                data_bytes = self.serialize(msg_to_send)
+                events.append((created_at, expiry, channel_name, data_bytes, 0))
 
-        # Bulk insert
-        if events:
-            async with self.connection() as conn:
+            # Bulk insert
+            if events:
                 await conn.executemany(
                     """
                     INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
