@@ -31,11 +31,11 @@ ASGI_APPLICATION = "demo.asgi.application"
 
 CHANNEL_LAYERS = {
     "default": {
-        "BACKEND": "channels_lite.layers.core.SQLiteChannelLayer",
-        # "BACKEND": "channels_redis.core.RedisChannelLayer",
+        # "BACKEND": "channels_lite.layers.aio.AIOSQLiteChannelLayer",
+        "BACKEND": "channels_redis.core.RedisChannelLayer",
         "CONFIG": {
-            "database": "default",
-            # "hosts": [("localhost", 6379)]
+            # "database": "default",
+            "hosts": [("localhost", 6379)]
         },
     },
 }

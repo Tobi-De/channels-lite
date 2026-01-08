@@ -572,8 +572,6 @@ async def test_capacity_enforcement_can_be_disabled(channel_layer):
     """
     Test that capacity enforcement can be disabled with enforce_capacity=False.
     """
-    from channels.exceptions import ChannelFull
-
     # Create layer with enforcement disabled
     test_layer = SQLiteChannelLayer(
         database="default", capacity=2, enforce_capacity=False

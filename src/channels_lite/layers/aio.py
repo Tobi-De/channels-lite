@@ -9,7 +9,6 @@ Requires installation with the [aio] extra:
 """
 
 import asyncio
-import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
 
@@ -100,41 +99,6 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         async with pool.connection() as conn:
             yield conn
 
-    async def _execute_write_with_retry(self, operation, max_retries=3):
-        """
-        Execute a write operation with retry logic for SQLite lock errors.
-
-        SQLite is not great with concurrent writers. With multiple event loops
-        and connection pools, lock contention can occur. This helper retries
-        with exponential backoff.
-
-        Args:
-            operation: Async function that takes a connection and performs writes
-            max_retries: Maximum number of retry attempts
-
-        Returns:
-            Result from the operation
-
-        Raises:
-            sqlite3.OperationalError: If still locked after all retries
-        """
-        last_error = None
-        for attempt in range(max_retries):
-            try:
-                async with self.connection() as conn:
-                    return await operation(conn)
-            except sqlite3.OperationalError as e:
-                if "database is locked" in str(e):
-                    last_error = e
-                    if attempt < max_retries - 1:
-                        # Exponential backoff: 50ms, 100ms, 200ms
-                        await asyncio.sleep(0.05 * (2**attempt))
-                        continue
-                raise
-        # If we get here, all retries failed
-        if last_error:
-            raise last_error
-
     def _to_django_datetime(self, dt=None):
         """Convert datetime to Django's ISO format string."""
         if dt is None:
@@ -162,18 +126,19 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             expiry or datetime.now() + timedelta(seconds=self.expiry)
         )
 
-        async def _send_operation(conn):
-            await conn.execute(
-                """
-                INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
-                VALUES (?, ?, ?, ?, 0)
-                """,
-                (created_at, expires_at, channel_non_local_name, data_bytes),
-            )
-            await conn.commit()
+        # Use base class retry wrapper for write operation
+        async def _send_op():
+            async with self.connection() as conn:
+                await conn.execute(
+                    """
+                    INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
+                    VALUES (?, ?, ?, ?, 0)
+                    """,
+                    (created_at, expires_at, channel_non_local_name, data_bytes),
+                )
+                await conn.commit()
 
-        # Use retry wrapper for write operation
-        await self._execute_write_with_retry(_send_operation)
+        await self._execute_with_retry(_send_op)
 
     async def _receive_single_from_db(self, channel):
         """Pull a single message from the database for the given channel."""
@@ -318,42 +283,43 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         assert isinstance(message, dict), "Message is not a dict"
         self.require_valid_group_name(group)
 
-        async def _group_send_operation(conn):
-            now = self._to_django_datetime()
+        # Use base class retry wrapper for write operation
+        async def _group_send_op():
+            async with self.connection() as conn:
+                now = self._to_django_datetime()
 
-            # Get all channels in the group
-            cursor = await conn.execute(
-                """
-                SELECT channel_name FROM channels_lite_groupmembership
-                WHERE group_name = ? AND expires_at >= ?
-                """,
-                (group, now),
-            )
-            channels = [row[0] for row in await cursor.fetchall()]
-
-            if not channels:
-                return
-
-            created_at = self._to_django_datetime()
-            expiry = self._to_django_datetime(
-                datetime.now() + timedelta(seconds=self.expiry)
-            )
-            events = [
-                (created_at, expiry, channel_name, data_bytes, 0)
-                async for channel_name, data_bytes in self._prepare_group_send_events(
-                    channels, message
-                )
-            ]
-
-            if events:
-                await conn.executemany(
+                # Get all channels in the group
+                cursor = await conn.execute(
                     """
-                    INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
-                    VALUES (?, ?, ?, ?, ?)
+                    SELECT channel_name FROM channels_lite_groupmembership
+                    WHERE group_name = ? AND expires_at >= ?
                     """,
-                    events,
+                    (group, now),
                 )
-                await conn.commit()
+                channels = [row[0] for row in await cursor.fetchall()]
 
-        # Use retry wrapper for write operation
-        await self._execute_write_with_retry(_group_send_operation)
+                if not channels:
+                    return
+
+                created_at = self._to_django_datetime()
+                expiry = self._to_django_datetime(
+                    datetime.now() + timedelta(seconds=self.expiry)
+                )
+                events = [
+                    (created_at, expiry, channel_name, data_bytes, 0)
+                    async for channel_name, data_bytes in self._prepare_group_send_events(
+                        channels, message
+                    )
+                ]
+
+                if events:
+                    await conn.executemany(
+                        """
+                        INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        events,
+                    )
+                    await conn.commit()
+
+        await self._execute_with_retry(_group_send_op)

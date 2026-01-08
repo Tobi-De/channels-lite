@@ -20,10 +20,14 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
             channel, message
         )
         data_bytes = self.serialize(prepared_message)
-        await Event.objects.acreate(
-            channel_name=channel_non_local_name,
-            data=data_bytes,
-            expires_at=expiry or (timezone.now() + timedelta(seconds=self.expiry)),
+
+        # Use base class retry wrapper for write operation
+        await self._execute_with_retry(
+            lambda: Event.objects.acreate(
+                channel_name=channel_non_local_name,
+                data=data_bytes,
+                expires_at=expiry or (timezone.now() + timedelta(seconds=self.expiry)),
+            )
         )
 
     async def _receive_single_from_db(self, channel):
@@ -151,5 +155,6 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
             )
         ]
 
+        # Use base class retry wrapper for bulk write operation
         if events:
-            await Event.objects.abulk_create(events)
+            await self._execute_with_retry(lambda: Event.objects.abulk_create(events))

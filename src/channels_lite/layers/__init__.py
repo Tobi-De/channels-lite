@@ -104,6 +104,45 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
         self.receive_count = 0
         self.receive_event_loop = None
 
+    async def _execute_with_retry(self, operation, max_retries=3):
+        """
+        Execute an async operation with retry logic for SQLite lock errors.
+
+        SQLite only supports one writer at a time. Under high load, multiple
+        concurrent writes can cause lock contention. This helper retries
+        operations with exponential backoff.
+
+        Works with both Django ORM (OperationalError) and aiosqlite (sqlite3.OperationalError).
+
+        Args:
+            operation: Async callable (function, lambda, or coroutine function)
+            max_retries: Maximum number of retry attempts
+
+        Returns:
+            Result from the operation
+
+        Raises:
+            Exception: Original exception if not a lock error or retries exhausted
+        """
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                return await operation()
+            except Exception as e:
+                # Check for SQLite lock errors (works for both sqlite3 and Django)
+                error_str = str(e).lower()
+                if "database is locked" in error_str or "locked" in error_str:
+                    last_error = e
+                    if attempt < max_retries - 1:
+                        # Exponential backoff: 50ms, 100ms, 200ms
+                        await asyncio.sleep(0.05 * (2**attempt))
+                        continue
+                # Not a lock error, re-raise immediately
+                raise
+        # If we get here, all retries failed with lock errors
+        if last_error:
+            raise last_error
+
     async def receive(self, channel):
         """
         Receive the first message that arrives on the channel.

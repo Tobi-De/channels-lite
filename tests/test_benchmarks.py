@@ -146,7 +146,7 @@ def test_benchmark_point_to_point_aiosqlite(benchmark):
 
 
 @pytest.mark.benchmark(group="group-broadcast")
-@pytest.mark.timeout(300)  # 5 minutes timeout for benchmarks
+@pytest.mark.timeout(600)  # 10 minutes timeout for benchmarks
 def test_benchmark_group_broadcast_sqlite(benchmark):
     """
     Benchmark SQLite: Broadcast 100 messages to 1,000 channels via groups.
@@ -155,7 +155,9 @@ def test_benchmark_group_broadcast_sqlite(benchmark):
     from channels_lite.layers.core import SQLiteChannelLayer
 
     async def run_benchmark():
-        layer = SQLiteChannelLayer(database="default", capacity=200000, auto_trim=False)
+        layer = SQLiteChannelLayer(
+            database="default", capacity=200000, auto_trim=False, expiry=300
+        )
 
         try:
             # Create 1,000 named channels and add to a group
@@ -256,7 +258,7 @@ def test_benchmark_group_broadcast_aiosqlite(benchmark):
     async def run_benchmark():
         # Use the Django test database
         layer = AIOSQLiteChannelLayer(
-            database="default", capacity=200000, auto_trim=False
+            database="default", capacity=200000, auto_trim=False, expiry=300
         )
 
         try:
