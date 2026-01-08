@@ -233,7 +233,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def close(self):
         """Close the channel layer and clean up resources."""
-        # Call parent's close to reset event loop tracking
+        # Call parent's close FIRST to cancel polling tasks before closing pools
         await super().close()
 
         # Close all per-event-loop pools
