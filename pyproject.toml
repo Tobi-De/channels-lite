@@ -1,6 +1,6 @@
 [project]
 name = "channels-lite"
-version = "0.3.4"
+version = "0.3.5"
 description = "Lightweight Django Channels layer backed by SQLite database"
 readme = "README.md"
 license = { text = "MIT" }
