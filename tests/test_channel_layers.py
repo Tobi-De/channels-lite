@@ -702,3 +702,38 @@ async def test_channel_specific_capacity_with_named_channels(channel_layer):
     for i in range(10):
         msg = await channel_layer.receive(normal_specific_channel)
         assert msg["type"] == f"test.{i}"
+
+
+@pytest.mark.asyncio
+async def test_safestring_serialization_msgpack():
+    """Test that Django SafeString types can be serialized with msgpack."""
+    from django.utils.safestring import mark_safe
+    from channels_lite.layers.aio import AIOSQLiteChannelLayer
+
+    layer = AIOSQLiteChannelLayer(database="default", serializer_format="msgpack")
+
+    try:
+        # Create a message with SafeString (like render_to_string output)
+        html = mark_safe("<div>Hello, World!</div>")
+        message = {
+            "type": "render",
+            "html": html,
+            "nested": {"also_html": mark_safe("<span>Nested</span>")},
+        }
+
+        # Send the message
+        channel_name = await layer.new_channel()
+        await layer.send(channel_name, message)
+
+        # Receive it back
+        received = await layer.receive(channel_name)
+
+        # SafeString should be converted to regular str during serialization
+        assert received["html"] == "<div>Hello, World!</div>"
+        assert received["nested"]["also_html"] == "<span>Nested</span>"
+        assert isinstance(
+            received["html"], str
+        )  # Should be regular str, not SafeString
+
+    finally:
+        await layer.close()

@@ -124,13 +124,41 @@ except ImportError as exc:
         exception = exc
 
 else:
+    # Import Django types that need special handling
+    from django.utils.safestring import SafeString
+    from django.utils.functional import Promise  # For lazy translation strings
+
+    def _django_enc_hook(obj):
+        """
+        Custom encoder hook for Django-specific types.
+
+        Converts Django types to standard Python types that msgspec can serialize.
+        """
+        # Handle SafeString (HTML marked as safe)
+        # SafeString is a subclass of str, so we need to force it to a primitive str
+        # by creating a new string through concatenation
+        if isinstance(obj, SafeString):
+            # Force a new str object by adding empty string - breaks the subclass link
+            return "" + obj
+        # Handle lazy translation strings (ugettext_lazy, etc.)
+        if isinstance(obj, Promise):
+            return "" + str(obj)
+
+        # If we don't know how to handle it, raise TypeError (msgspec convention)
+        raise TypeError(f"Objects of type {type(obj)} are not supported")
 
     class MsgPackSerializer(BaseMessageSerializer):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            # Create encoder with Django type support
+            self._encoder = msgspec.msgpack.Encoder(enc_hook=_django_enc_hook)
+            self._decoder = msgspec.msgpack.Decoder()
+
         def as_bytes(self, message, *args, **kwargs):
-            return msgspec.msgpack.encode(message)
+            return self._encoder.encode(message)
 
         def from_bytes(self, message, *args, **kwargs):
-            return msgspec.msgpack.decode(message)
+            return self._decoder.decode(message)
 
 
 class SerializersRegistry:
