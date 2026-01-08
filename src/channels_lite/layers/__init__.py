@@ -263,6 +263,38 @@ class BaseSQLiteChannelLayer(BaseChannelLayer):
             del message["__asgi_channel__"]
         return full_channel
 
+    async def _prepare_group_send_events(self, channels, message):
+        """
+        Async generator that yields prepared event data for each channel in a group.
+
+        Args:
+            channels: List of channel names in the group
+            message: The message dict to send
+
+        Yields:
+            tuple: (channel_name, serialized_data_bytes) for each valid channel
+        """
+        for channel in channels:
+            # Handle process-local channels (with "!")
+            if "!" in channel:
+                msg_to_send = message.copy()
+                msg_to_send["__asgi_channel__"] = channel
+                channel_name = self.non_local_name(channel)
+            else:
+                msg_to_send = message
+                channel_name = channel
+
+            # Check capacity - silently drop if over capacity (per spec)
+            if self.enforce_capacity:
+                capacity = self.get_capacity(channel)
+                pending_count = await self._get_channel_pending_count(channel_name)
+                if pending_count >= capacity:
+                    continue  # Skip this channel
+
+            # Serialize message to bytes
+            data_bytes = self.serialize(msg_to_send)
+            yield (channel_name, data_bytes)
+
     # Serialization methods
 
     def serialize(self, message):

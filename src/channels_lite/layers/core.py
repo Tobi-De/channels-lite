@@ -1,4 +1,3 @@
-from copy import deepcopy
 from datetime import timedelta
 
 from asgiref.sync import sync_to_async
@@ -145,34 +144,12 @@ class SQLiteChannelLayer(BaseSQLiteChannelLayer):
             return
 
         expiry = timezone.now() + timedelta(seconds=self.expiry)
-        events = []
-
-        for channel in channels:
-            # Handle process-local channels (with "!")
-            if "!" in channel:
-                msg_to_send = deepcopy(message)
-                msg_to_send["__asgi_channel__"] = channel
-                channel_name = self.non_local_name(channel)
-            else:
-                msg_to_send = message
-                channel_name = channel
-
-            # Check capacity - silently drop if over capacity (per spec)
-            # Only check if enforce_capacity is enabled
-            if self.enforce_capacity:
-                capacity = self.get_capacity(channel)
-                pending_count = await self._get_channel_pending_count(channel_name)
-                if pending_count >= capacity:
-                    continue
-
-            data_bytes = self.serialize(msg_to_send)
-            events.append(
-                Event(
-                    channel_name=channel_name,
-                    data=data_bytes,
-                    expires_at=expiry,
-                )
+        events = [
+            Event(channel_name=channel_name, data=data_bytes, expires_at=expiry)
+            async for channel_name, data_bytes in self._prepare_group_send_events(
+                channels, message
             )
+        ]
 
         if events:
             await Event.objects.abulk_create(events)

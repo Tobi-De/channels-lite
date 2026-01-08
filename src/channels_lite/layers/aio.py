@@ -22,8 +22,6 @@ except ImportError as e:
         "Install them with: pip install channels-lite[aio]"
     ) from e
 
-from channels.exceptions import ChannelFull
-
 from . import BaseSQLiteChannelLayer, ChannelEmpty
 
 
@@ -41,12 +39,6 @@ class SQLiteLoopLayer:
         self.pool = None
 
     async def get_pool(self):
-        """
-        Lazily create the connection pool for this event loop.
-
-        Note: SQLite only supports one writer at a time, so we use a small
-        pool size to reduce lock contention across multiple event loops.
-        """
         if self.pool is None:
 
             async def connection_factory():
@@ -70,11 +62,8 @@ class SQLiteLoopLayer:
                 await conn.executescript(init_command)
                 return conn
 
-            # Use smaller pool size to reduce write lock contention
-            # SQLite only allows one writer at a time, so large pools don't help
-            effective_pool_size = min(self.channel_layer.pool_size, 3)
             self.pool = SQLiteConnectionPool(
-                connection_factory, pool_size=effective_pool_size
+                connection_factory, pool_size=self.channel_layer.pool_size
             )
 
         return self.pool
@@ -96,24 +85,17 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         self.pool_size = pool_size
         self.db_path = self.db_settings["NAME"]
         # Per-event-loop state (pools, locks, etc.)
-        # Follows the pattern from channels_redis.core.RedisChannelLayer
         self._layers = {}
-
-    def _get_layer(self):
-        """
-        Get or create the SQLiteLoopLayer for the current event loop.
-        """
-        loop = asyncio.get_running_loop()
-        if loop not in self._layers:
-            self._layers[loop] = SQLiteLoopLayer(self)
-        return self._layers[loop]
 
     @asynccontextmanager
     async def connection(self):
         """
         Context manager that returns a connection from the current event loop's pool.
         """
-        layer = self._get_layer()
+        loop = asyncio.get_running_loop()
+        if loop not in self._layers:
+            self._layers[loop] = SQLiteLoopLayer(self)
+        layer = self._layers[loop]
         pool = await layer.get_pool()
         async with pool.connection() as conn:
             yield conn
@@ -122,7 +104,7 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         """
         Execute a write operation with retry logic for SQLite lock errors.
 
-        SQLite only supports one writer at a time. With multiple event loops
+        SQLite is not great with concurrent writers. With multiple event loops
         and connection pools, lock contention can occur. This helper retries
         with exponential backoff.
 
@@ -168,20 +150,12 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
 
     async def send(self, channel, message, expiry=None):
         """Send a message onto a (general or specific) channel."""
-        # Validate and prepare message (without capacity check)
-        assert isinstance(message, dict), "message is not a dict"
-        self.require_valid_channel_name(channel)
-        assert "__asgi_channel__" not in message
+        # Use base class helper for validation, preparation, and capacity check
+        channel_non_local_name, prepared_message = await self._prepare_message_for_send(
+            channel, message
+        )
 
-        # Prepare message
-        channel_non_local_name = channel
-        prepared_message = message.copy()
-
-        # Handle process-local channels
-        if "!" in channel:
-            prepared_message["__asgi_channel__"] = channel
-            channel_non_local_name = self.non_local_name(channel)
-
+        # Serialize and prepare for database insert
         data_bytes = self.serialize(prepared_message)
         created_at = self._to_django_datetime()
         expires_at = self._to_django_datetime(
@@ -189,23 +163,6 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         )
 
         async def _send_operation(conn):
-            # Check capacity (if enforcement is enabled)
-            if self.enforce_capacity:
-                capacity = self.get_capacity(channel)
-                now = self._to_django_datetime()
-                cursor = await conn.execute(
-                    """
-                    SELECT COUNT(*) FROM channels_lite_event
-                    WHERE channel_name = ? AND delivered = 0 AND expires_at >= ?
-                    """,
-                    (channel_non_local_name, now),
-                )
-                row = await cursor.fetchone()
-                pending_count = row[0] if row else 0
-
-                if pending_count >= capacity:
-                    raise ChannelFull(f"Channel {channel} is at capacity ({capacity})")
-
             await conn.execute(
                 """
                 INSERT INTO channels_lite_event (created_at, expires_at, channel_name, data, delivered)
@@ -318,7 +275,6 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
         for layer in list(self._layers.values()):
             await layer.close()
 
-        # Clear the layers dict
         self._layers.clear()
 
     # Groups extension
@@ -378,48 +334,17 @@ class AIOSQLiteChannelLayer(BaseSQLiteChannelLayer):
             if not channels:
                 return
 
-            # Prepare events for bulk insert
             created_at = self._to_django_datetime()
             expiry = self._to_django_datetime(
                 datetime.now() + timedelta(seconds=self.expiry)
             )
-            events = []
-            channels_over_capacity = 0
+            events = [
+                (created_at, expiry, channel_name, data_bytes, 0)
+                async for channel_name, data_bytes in self._prepare_group_send_events(
+                    channels, message
+                )
+            ]
 
-            for channel in channels:
-                # Handle process-local channels
-                if "!" in channel:
-                    msg_to_send = message.copy()
-                    msg_to_send["__asgi_channel__"] = channel
-                    channel_name = self.non_local_name(channel)
-                else:
-                    msg_to_send = message
-                    channel_name = channel
-
-                # Check capacity - silently drop if over capacity (per spec)
-                # Only check if enforce_capacity is enabled
-                if self.enforce_capacity:
-                    capacity = self.get_capacity(channel)
-                    # Check capacity using the same connection
-                    cursor = await conn.execute(
-                        """
-                        SELECT COUNT(*) FROM channels_lite_event
-                        WHERE channel_name = ? AND delivered = 0 AND expires_at >= ?
-                        """,
-                        (channel_name, now),
-                    )
-                    row = await cursor.fetchone()
-                    pending_count = row[0] if row else 0
-
-                    if pending_count >= capacity:
-                        channels_over_capacity += 1
-                        continue
-
-                # Serialize message to bytes
-                data_bytes = self.serialize(msg_to_send)
-                events.append((created_at, expiry, channel_name, data_bytes, 0))
-
-            # Bulk insert
             if events:
                 await conn.executemany(
                     """
